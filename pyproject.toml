@@ -1,0 +1,19 @@
+﻿[project]
+name = "FramePlayer"
+version = "1.0.0"
+description = "CarPlay & Tablet YouTube Music Player with Digital Photo Frame"
+authors = [{ name = "FramePlayer" }]
+dependencies = [
+    "flet>=0.25.0",
+    "pillow>=10.0.0",
+    "ytmusicapi>=1.12.0",
+    "yt-dlp>=2024.0.0",
+    "qrcode>=7.4.0",
+    "requests>=2.28.0",
+]
+
+[tool.flet]
+org = "com.frameplayer.app"
+product = "Frame Player"
+company = "FramePlayer"
+copyright = "Copyright (C) 2026"
