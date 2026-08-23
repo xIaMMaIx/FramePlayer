@@ -1,4 +1,4 @@
-﻿[project]
+[project]
 name = "FramePlayer"
 version = "1.0.0"
 description = "CarPlay & Tablet YouTube Music Player with Digital Photo Frame"
