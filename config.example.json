@@ -1,0 +1,16 @@
+﻿{
+  "photo_folder": "assets/samples",
+  "idle_timeout_seconds": 60,
+  "slideshow_interval_seconds": 8,
+  "slideshow_shuffle": true,
+  "volume": 0.75,
+  "last_played_track_id": "",
+  "repeat_mode": "off",
+  "shuffle_mode": false,
+  "kiosk_fullscreen": true,
+  "show_clock_on_photo_frame": false,
+  "background_blur_radius": 24,
+  "orientation": "landscape",
+  "oauth_client_id": "",
+  "oauth_client_secret": ""
+}
