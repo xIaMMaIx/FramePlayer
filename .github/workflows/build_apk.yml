@@ -39,11 +39,10 @@ jobs:
         run: |
           printf 'y\ny\ny\n' | flet build apk --project "FramePlayer" --org "com.frameplayer.app" --product "Frame Player" -vv --no-rich-output 2>&1 | tee flet_build.log
 
-      - name: Display Full Log on Failure
-        if: failure()
+      - name: List Build Outputs
         run: |
-          echo "=== FLET BUILD ERROR LOG ==="
-          cat flet_build.log || true
+          echo "=== BUILD OUTPUT FILES ==="
+          find build/ -type f || true
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
@@ -51,6 +50,7 @@ jobs:
         with:
           name: FramePlayer-Release-APK
           path: |
-            build/apk/*.apk
+            build/**/*.apk
+            build/apk/**
             flet_build.log
           retention-days: 14
