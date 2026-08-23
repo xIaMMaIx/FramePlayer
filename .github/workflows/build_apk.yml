@@ -44,13 +44,22 @@ jobs:
           pip install -r requirements.txt
 
       - name: Build APK with Flet
+        id: flet_build
         run: |
-          flet build apk --project "FramePlayer" --org "com.frameplayer.app" --product "Frame Player" -vv --no-rich-output
+          flet build apk --project "FramePlayer" --org "com.frameplayer.app" --product "Frame Player" -vv --no-rich-output 2>&1 | tee flet_build.log
 
-      - name: Upload APK Artifact
+      - name: Display Error Log if Failed
+        if: failure()
+        run: |
+          echo "=== RECENT FLET BUILD LOG ==="
+          tail -n 300 flet_build.log || true
+
+      - name: Upload APK & Build Logs
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: FramePlayer-Release-APK
-          path: build/apk/*.apk
+          name: FramePlayer-Build-Logs-And-APK
+          path: |
+            build/apk/*.apk
+            flet_build.log
           retention-days: 14
