@@ -37,21 +37,12 @@ jobs:
 
       - name: Build APK with Flet
         run: |
-          printf 'y\ny\ny\n' | flet build apk --project "FramePlayer" --org "com.frameplayer.app" --product "Frame Player" -vv --no-rich-output 2>&1 | tee flet_build.log
+          mkdir -p dist
+          printf 'y\ny\ny\n' | flet build apk -o dist --project "FramePlayer" --org "com.frameplayer.app" --product "Frame Player" -vv --no-rich-output
 
-      - name: Print Build Log & Output Location
-        run: |
-          echo "=== FLET BUILD LOG ==="
-          cat flet_build.log
-          echo "=== SEARCHING ALL APK FILES ==="
-          find . -name "*.apk" -ls || true
-
-      - name: Upload APK Artifact
+      - name: Upload APK to GitHub Artifacts
         uses: actions/upload-artifact@v4
-        if: always()
         with:
-          name: FramePlayer-Release-APK
-          path: |
-            **/*.apk
-            flet_build.log
+          name: FramePlayer-APK
+          path: dist/*
           retention-days: 14
