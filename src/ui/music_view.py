@@ -12,7 +12,12 @@ from pathlib import Path
 import re
 from typing import Callable, Dict, List, Optional
 import flet as ft
-from PIL import Image, ImageFilter, ImageEnhance
+try:
+    from PIL import Image, ImageFilter, ImageEnhance
+except ImportError:
+    Image = None
+    ImageFilter = None
+    ImageEnhance = None
 import requests
 
 from src.config_manager import ConfigManager
@@ -251,7 +256,7 @@ class MusicPlayerView(ft.Container):
 
     def _get_blurred_cover_art(self, art_url: Optional[str]) -> Optional[str]:
         """Generates Gaussian-blurred base64 cover art with user-configured blur radius."""
-        if not art_url:
+        if not Image or not art_url:
             return None
 
         radius = self.config_mgr.get("background_blur_radius", 24) if self.config_mgr else 24

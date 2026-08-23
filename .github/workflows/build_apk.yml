@@ -45,15 +45,12 @@ jobs:
 
       - name: Build APK with Flet
         run: |
-          set -o pipefail
-          flet build apk --project "FramePlayer" --org "com.frameplayer.app" --product "Frame Player" -vv --no-rich-output 2>&1 | tee build_output.log
+          flet build apk --project "FramePlayer" --org "com.frameplayer.app" --product "Frame Player" -vv --no-rich-output
 
-      - name: Upload Build Log & APK Artifact
+      - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: FramePlayer-Build-Artifacts
-          path: |
-            build/apk/*.apk
-            build_output.log
+          name: FramePlayer-Release-APK
+          path: build/apk/*.apk
           retention-days: 14

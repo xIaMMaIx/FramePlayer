@@ -123,19 +123,32 @@ class OAuthManager:
 
     def generate_qr_code_base64(self, url: str) -> str:
         """Generates a high-contrast QR code image as a PNG base64 string."""
-        qr = qrcode.QRCode(
-            version=1,
-            error_correction=qrcode.constants.ERROR_CORRECT_M,
-            box_size=8,
-            border=2,
-        )
-        qr.add_data(url)
-        qr.make(fit=True)
-        img = qr.make_image(fill_color="#000000", back_color="#FFFFFF")
+        try:
+            qr = qrcode.QRCode(
+                version=1,
+                error_correction=qrcode.constants.ERROR_CORRECT_M,
+                box_size=8,
+                border=2,
+            )
+            qr.add_data(url)
+            qr.make(fit=True)
+            img = qr.make_image(fill_color="#000000", back_color="#FFFFFF")
 
-        buffered = io.BytesIO()
-        img.save(buffered, format="PNG")
-        return base64.b64encode(buffered.getvalue()).decode("utf-8")
+            buffered = io.BytesIO()
+            img.save(buffered, format="PNG")
+            return base64.b64encode(buffered.getvalue()).decode("utf-8")
+        except Exception as e:
+            print(f"[OAuthManager] Local QR generation fallback: {e}")
+            import urllib.parse
+            import requests
+            try:
+                encoded = urllib.parse.quote(url)
+                resp = requests.get(f"https://api.qrserver.com/v1/create-qr-code/?data={encoded}&size=250x250", timeout=5)
+                if resp.status_code == 200:
+                    return base64.b64encode(resp.content).decode("utf-8")
+            except Exception:
+                pass
+            return ""
 
     # ─── Logout ──────────────────────────────────────────────────────
 

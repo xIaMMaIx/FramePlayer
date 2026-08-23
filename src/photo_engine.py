@@ -11,7 +11,11 @@ import os
 from pathlib import Path
 import random
 from typing import Dict, List, Optional
-from PIL import Image, ImageFilter
+try:
+    from PIL import Image, ImageFilter
+except ImportError:
+    Image = None
+    ImageFilter = None
 
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 FALLBACK_SAMPLES_DIR = Path("assets/samples").resolve()
@@ -108,7 +112,7 @@ class PhotoEngine:
         Generates a fast Gaussian-blurred ambient background for the photo.
         Returns a base64 encoded JPEG string.
         """
-        if not photo_path or not os.path.exists(photo_path):
+        if not Image or not photo_path or not os.path.exists(photo_path):
             return None
 
         radius = blur_radius if blur_radius is not None else self.blur_radius
