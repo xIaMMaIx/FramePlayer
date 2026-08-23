@@ -20,22 +20,10 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Set up Flutter SDK
-        uses: subosito/flutter-action@v2
-        with:
-          channel: 'stable'
-          cache: false
-
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
-      - name: Configure Flutter and Accept Android Licenses
-        run: |
-          flutter config --no-analytics
-          yes | flutter doctor --android-licenses || true
-          flutter doctor -v
 
       - name: Install Python Dependencies
         run: |
@@ -43,23 +31,14 @@ jobs:
           pip install "flet[all]>=0.25.0"
           pip install -r requirements.txt
 
-      - name: Build APK with Flet
-        id: flet_build
+      - name: Build APK with Flet (Auto-install required Flutter)
         run: |
-          flet build apk --project "FramePlayer" --org "com.frameplayer.app" --product "Frame Player" -vv --no-rich-output 2>&1 | tee flet_build.log
+          yes | flet build apk --project "FramePlayer" --org "com.frameplayer.app" --product "Frame Player" -vv --no-rich-output
 
-      - name: Display Error Log if Failed
-        if: failure()
-        run: |
-          echo "=== RECENT FLET BUILD LOG ==="
-          tail -n 300 flet_build.log || true
-
-      - name: Upload APK & Build Logs
+      - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: FramePlayer-Build-Logs-And-APK
-          path: |
-            build/apk/*.apk
-            flet_build.log
+          name: FramePlayer-Release-APK
+          path: build/apk/*.apk
           retention-days: 14
