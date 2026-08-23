@@ -37,12 +37,11 @@ jobs:
 
       - name: Build APK with Flet
         run: |
-          mkdir -p dist
-          printf 'y\ny\ny\n' | flet build apk -o dist --project "FramePlayer" --org "com.frameplayer.app" --product "Frame Player" -vv --no-rich-output
+          printf 'y\ny\ny\n' | flet build apk --project "FramePlayer" --org "com.frameplayer.app" --product "Frame Player" -vv --no-rich-output
 
       - name: Upload APK to GitHub Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: FramePlayer-APK
-          path: dist/*
+          path: build/apk/
           retention-days: 14
