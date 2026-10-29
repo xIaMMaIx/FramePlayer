@@ -103,10 +103,13 @@ class ActionOverlay(ft.Container):
         )
 
         super().__init__(
-            content=ft.Column(
-                controls=[modal_content],
-                alignment=ft.MainAxisAlignment.CENTER,
-                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            content=ft.SafeArea(
+                content=ft.Column(
+                    controls=[modal_content],
+                    alignment=ft.MainAxisAlignment.CENTER,
+                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                    expand=True,
+                ),
                 expand=True,
             ),
             bgcolor="rgba(0, 0, 0, 0.85)",

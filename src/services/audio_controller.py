@@ -1,16 +1,11 @@
 """
 Audio Playback & State Controller (AudioController).
-Integrates dedicated FFPlay hardware streaming engine with HTTP auto-reconnect,
-stream stall auto-recovery, volume control, track queue management, and UI state synchronization.
+Plays streams through the native Flet Audio control (Android), with volume control,
+track queue management, and UI state synchronization.
 """
 
 import asyncio
-import atexit
-import os
 import random
-import shutil
-import subprocess
-import sys
 from typing import Any, Callable, List, Optional
 
 from src.music_backend import BaseMusicBackend, MOCK_TRACKS, Track
@@ -18,86 +13,6 @@ from src.services.ytmusic_service import YTMusicService
 from src.state import AppState
 
 DEFAULT_AUDIO_PLACEHOLDER = "https://raw.githubusercontent.com/mdn/webaudio-examples/main/audio-analyser/viper.mp3"
-
-
-class FFPlayAudioEngine:
-    """Subprocess audio playback engine using FFPlay with resilient stream reconnect and clean exit."""
-
-    def __init__(self):
-        self._proc: Optional[subprocess.Popen] = None
-        self._ffplay_path = shutil.which("ffplay") or "ffplay"
-        self._volume: int = 75  # 0 to 100
-        atexit.register(self.stop)
-
-    def play(self, url: str, start_pos: float = 0.0, volume: float = 0.75) -> bool:
-        """Starts streaming audio from direct URL with auto-reconnect enabled."""
-        self.stop()
-        self._volume = max(0, min(100, int(volume * 100)))
-
-        if not os.path.exists(self._ffplay_path) and not shutil.which("ffplay"):
-            print(f"[FFPlayAudioEngine] ffplay not found at {self._ffplay_path}")
-            return False
-
-        cmd = [
-            self._ffplay_path,
-            "-nodisp",
-            "-autoexit",
-            "-loglevel",
-            "quiet",
-            "-reconnect",
-            "1",
-            "-reconnect_streamed",
-            "1",
-            "-reconnect_delay_max",
-            "5",
-            "-volume",
-            str(self._volume),
-        ]
-        if start_pos > 1.0:
-            cmd.extend(["-ss", str(int(start_pos))])
-        cmd.append(url)
-
-        try:
-            creationflags = 0
-            if os.name == "nt":
-                creationflags = subprocess.CREATE_NO_WINDOW
-
-            self._proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=creationflags,
-            )
-            print(f"[FFPlayAudioEngine] Stream playing via FFPlay (PID: {self._proc.pid}, Pos: {int(start_pos)}s, Vol: {self._volume}%)")
-            return True
-        except Exception as e:
-            print(f"[FFPlayAudioEngine] Error launching ffplay: {e}")
-            return False
-
-    def stop(self) -> None:
-        """Stops active audio playback process and ensures no orphan survives."""
-        if self._proc:
-            try:
-                self._proc.terminate()
-                self._proc.kill()
-            except Exception:
-                pass
-            self._proc = None
-
-    def is_running(self) -> bool:
-        """Returns True if audio process is currently active."""
-        if self._proc:
-            return self._proc.poll() is None
-        return False
-
-    def is_available(self) -> bool:
-        """Returns True if ffplay executable is found on system."""
-        return bool((self._ffplay_path and os.path.exists(self._ffplay_path)) or shutil.which("ffplay"))
-
-    def set_volume(self, volume: float) -> None:
-        """Updates playback volume. Restarts ffplay with new volume if currently running."""
-        self._volume = max(0, min(100, int(volume * 100)))
-        # FFPlay doesn't support dynamic volume change; volume is applied on next play()
 
 
 def _parse_duration_to_seconds(val) -> float:
@@ -132,9 +47,6 @@ class AudioController(BaseMusicBackend):
         self.audio = audio_control
         self.async_runner = async_runner
 
-        # Hardware FFPlay Audio Engine (Desktop fallback)
-        self.ffplay = FFPlayAudioEngine()
-
         # Playback & Queue State
         self._queue: List[Track] = list(MOCK_TRACKS)
         self._current_index: int = 0
@@ -155,13 +67,6 @@ class AudioController(BaseMusicBackend):
 
         # Bind Flet Audio callbacks if provided
         self._setup_flet_audio()
-
-    @property
-    def _use_native_flet_audio(self) -> bool:
-        """Use native Flet Audio on Android/mobile/non-windows platforms, or when FFPlay is not available."""
-        if sys.platform != "win32":
-            return bool(self.audio)
-        return bool(self.audio) and not self.ffplay.is_available()
 
     async def _safe_audio_call(self, coro, timeout: float = 12.0):
         """Safely awaits Flet Audio RPC calls with timeout to prevent hanging."""
@@ -216,6 +121,10 @@ class AudioController(BaseMusicBackend):
         return self._is_playing
 
     @property
+    def is_loading(self) -> bool:
+        return self._is_loading_stream
+
+    @property
     def queue(self) -> List[Track]:
         return self._queue
 
@@ -264,11 +173,8 @@ class AudioController(BaseMusicBackend):
         self.state.is_playing = True
         self.state.reset_idle()
 
-        if self._loaded_track_id == curr.id and self._current_stream_url:
-            if self._use_native_flet_audio:
-                self._run_async(self._safe_audio_call(self.audio.resume()))
-            else:
-                self.ffplay.play(self._current_stream_url, start_pos=self._position_seconds, volume=self._volume)
+        if self._loaded_track_id == curr.id and self._current_stream_url and self.audio:
+            self._run_async(self._safe_audio_call(self.audio.resume()))
             self._notify_state()
         else:
             self._run_async(self._load_and_play_track(curr))
@@ -277,9 +183,8 @@ class AudioController(BaseMusicBackend):
         """Pauses audio playback."""
         self._is_playing = False
         self.state.is_playing = False
-        if self._use_native_flet_audio:
+        if self.audio:
             self._run_async(self._safe_audio_call(self.audio.pause()))
-        self.ffplay.stop()
         self._notify_state()
 
     def toggle_play(self) -> bool:
@@ -343,10 +248,8 @@ class AudioController(BaseMusicBackend):
         self._position_seconds = max(0.0, min(position_seconds, max_dur))
         self.state.position_seconds = self._position_seconds
 
-        if self._use_native_flet_audio:
+        if self.audio:
             self._run_async(self._safe_audio_call(self.audio.seek(int(self._position_seconds * 1000))))
-        elif self._current_stream_url and self._is_playing:
-            self.ffplay.play(self._current_stream_url, start_pos=self._position_seconds, volume=self._volume)
 
         self._notify_state()
 
@@ -361,8 +264,6 @@ class AudioController(BaseMusicBackend):
                 self.audio.update()
             except Exception:
                 pass
-        if self.ffplay.is_running():
-            self.ffplay.set_volume(self._volume)
 
         self._notify_state()
 
@@ -443,7 +344,7 @@ class AudioController(BaseMusicBackend):
         self._notify_state()
 
     async def _load_and_play_track(self, track: Track) -> None:
-        """Resolves audio stream and starts playback via native Flet Audio on Android or FFPlay on Desktop."""
+        """Resolves the audio stream and starts playback via native Flet Audio."""
         self._is_loading_stream = True
         self._position_seconds = 0.0
         self._is_playing = False
@@ -467,7 +368,7 @@ class AudioController(BaseMusicBackend):
         self._current_stream_url = stream_url
         self._loaded_track_id = track.id
         
-        if self._use_native_flet_audio:
+        if self.audio:
             self.audio.src = stream_url
             self.audio.volume = max(0.0, min(1.0, self._volume))
             try:
@@ -477,36 +378,10 @@ class AudioController(BaseMusicBackend):
             await self._safe_audio_call(self.audio.play())
             self._is_playing = True
             self.state.is_playing = True
-            print(f"[AudioController] Audio stream playing via native Flet Audio: '{track.title}'")
-        else:
-            # Desktop FFPlay Hardware streaming
-            self.ffplay.play(stream_url, start_pos=0.0, volume=self._volume)
-            self._is_playing = True
-            self.state.is_playing = True
-            print(f"[AudioController] Audio stream playing via FFPlay (Vol: {int(self._volume*100)}%): '{track.title}'")
+            print(f"[AudioController] Audio stream playing: '{track.title}'")
 
         self._is_loading_stream = False
         self._notify_state()
-
-    def tick_playback(self) -> None:
-        """Called every second by background ticker."""
-        if not self._is_playing:
-            return
-
-        # If running without Flet Audio position change events (e.g. desktop FFPlay fallback)
-        if not self._use_native_flet_audio:
-            self._position_seconds += 1.0
-            self.state.position_seconds = self._position_seconds
-
-            curr = self.current_track
-            dur = curr.duration_seconds if curr and curr.duration_seconds > 0 else self.duration_seconds
-
-            if not self.ffplay.is_running():
-                if self._position_seconds >= dur - 3:
-                    self._handle_track_completed()
-                elif self._current_stream_url and self._position_seconds < dur - 5:
-                    print(f"[AudioController] Stream stall detected at {int(self._position_seconds)}s. Auto-reconnecting...")
-                    self.ffplay.play(self._current_stream_url, start_pos=self._position_seconds, volume=self._volume)
 
     def _handle_track_completed(self) -> None:
         """Advances track or repeats when audio completes."""

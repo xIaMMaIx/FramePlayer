@@ -164,7 +164,7 @@ class LibraryDrawer(ft.Container):
         )
 
         super().__init__(
-            content=self.drawer_row,
+            content=ft.SafeArea(content=self.drawer_row, expand=True),
             bgcolor="rgba(0, 0, 0, 0.65)",
             expand=True,
             visible=False,
@@ -395,8 +395,12 @@ class LibraryDrawer(ft.Container):
         except Exception:
             pass
 
-        loop = asyncio.get_event_loop()
-        tracks = await loop.run_in_executor(None, self.ytmusic_service.search_tracks, query, 30)
+        loop = asyncio.get_running_loop()
+        try:
+            tracks = await loop.run_in_executor(None, self.ytmusic_service.search_tracks, query, 30)
+        except Exception as ex:
+            tracks = []
+            self.ytmusic_service.last_search_error = f"{type(ex).__name__}: {ex}"
         self.spinner.visible = False
         self._search_results = tracks
         self._render_search_results()
@@ -426,12 +430,18 @@ class LibraryDrawer(ft.Container):
         self.content_list.controls.append(ft.Container(height=4))
 
         if not self._search_results:
+            error = self.ytmusic_service.last_search_error
+            message = (
+                f"Search failed — check your internet connection.\n{error}"
+                if error
+                else "No songs found. Try a different search term."
+            )
             self.content_list.controls.append(
                 ft.Container(
                     content=ft.Column(
                         [
-                            ft.Icon(ft.Icons.SEARCH_OFF_ROUNDED, size=40, color=TEXT_MUTED),
-                            ft.Text("No songs found. Try a different search term.", size=13, color=TEXT_MUTED),
+                            ft.Icon(ft.Icons.CLOUD_OFF_ROUNDED if error else ft.Icons.SEARCH_OFF_ROUNDED, size=40, color=TEXT_MUTED),
+                            ft.Text(message, size=13, color=TEXT_MUTED, text_align=ft.TextAlign.CENTER, selectable=True),
                         ],
                         horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                         spacing=6,

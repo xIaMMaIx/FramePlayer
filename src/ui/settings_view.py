@@ -167,9 +167,19 @@ class SettingsView(ft.Container):
                         ft.Row(
                             [
                                 ft.Icon(ft.Icons.SETTINGS_ROUNDED, size=24, color=ACCENT_RED),
-                                ft.Text("Settings & Configuration", size=20, weight=ft.FontWeight.BOLD, color=TEXT_PRIMARY),
+                                # Shrinks with ellipsis so the Back button stays on screen in portrait
+                                ft.Text(
+                                    "Settings & Configuration",
+                                    size=20,
+                                    weight=ft.FontWeight.BOLD,
+                                    color=TEXT_PRIMARY,
+                                    max_lines=1,
+                                    overflow=ft.TextOverflow.ELLIPSIS,
+                                    expand=True,
+                                ),
                             ],
                             spacing=10,
+                            expand=True,
                         ),
                         ft.ElevatedButton(
                             content=ft.Row([ft.Icon(ft.Icons.MUSIC_NOTE_ROUNDED, size=18), ft.Text("Back to Player", weight=ft.FontWeight.BOLD)]),

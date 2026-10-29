@@ -5,8 +5,6 @@ yt-dlp Direct Audio Streaming Engine, and Background Screen Automation.
 """
 
 import asyncio
-import os
-import sys
 from pathlib import Path
 import flet as ft
 
@@ -92,30 +90,6 @@ async def main(page: ft.Page):
 
     ytmusic_service = YTMusicService(config_mgr=config_mgr)
 
-    # Window geometry for touch tablet (Orientation-aware)
-    orientation = config_mgr.get("orientation", "landscape")
-    try:
-        if hasattr(page, "window"):
-            if orientation == "portrait":
-                page.window.width = 600
-                page.window.height = 1024
-                page.window.min_width = 400
-                page.window.min_height = 600
-            else:
-                page.window.width = 1280
-                page.window.height = 720
-                page.window.min_width = 800
-                page.window.min_height = 480
-            page.run_task(page.window.center)
-
-            def handle_window_event(e):
-                if e.data in ("close", "destroy"):
-                    if "audio_controller" in locals():
-                        audio_controller.ffplay.stop()
-
-            page.window.on_event = handle_window_event
-    except Exception as e:
-        print(f"[Main] Window config note: {e}")
     local_playlist_mgr = LocalPlaylistManager()
 
     # --- 3. Audio Control Setup & Local Playlist Startup ---
@@ -293,17 +267,6 @@ async def main(page: ft.Page):
     )
 
     def handle_orientation_change(new_orientation: str):
-        try:
-            if hasattr(page, "window"):
-                if new_orientation == "portrait":
-                    page.window.width = 600
-                    page.window.height = 1024
-                else:
-                    page.window.width = 1280
-                    page.window.height = 720
-                page.run_task(page.window.center)
-        except Exception as e:
-            print(f"[Main] Window resize note: {e}")
         music_view.rebuild_layout()
         music_view.update()
         page.update()
@@ -331,8 +294,10 @@ async def main(page: ft.Page):
         expand=True,
     )
 
+    # SafeArea keeps buttons out from under the Android status / navigation bars
+    # (the theme draws edge-to-edge with transparent system bars).
     dashboard_container = ft.Container(
-        content=content_area,
+        content=ft.SafeArea(content=content_area, expand=True),
         expand=True,
         visible=True,
     )
@@ -373,7 +338,10 @@ async def main(page: ft.Page):
             await asyncio.sleep(1)
             try:
                 if state.mode != AppMode.PHOTO_FRAME:
-                    if not audio_controller.is_playing:
+                    # Keyboard input in the library search doesn't reach the root
+                    # GestureDetector, so an open drawer or a loading stream counts as activity.
+                    busy = audio_controller.is_playing or audio_controller.is_loading or library_drawer.visible
+                    if not busy:
                         state.idle_seconds += 1
 
                         if state.idle_seconds >= state.idle_threshold_seconds:
@@ -402,7 +370,6 @@ async def main(page: ft.Page):
             await asyncio.sleep(1)
             try:
                 if audio_controller.is_playing:
-                    audio_controller.tick_playback()
                     if state.mode == AppMode.MUSIC_PLAYER:
                         music_view.update_progress_only()
                     elif state.mode == AppMode.PHOTO_FRAME:

@@ -3,13 +3,17 @@ name = "FramePlayer"
 version = "1.0.0"
 description = "CarPlay & Tablet YouTube Music Player with Digital Photo Frame"
 authors = [{ name = "FramePlayer" }]
+# flet packages must match the installed flet-cli (0.86.5); `flet build` installs
+# these specs, so an open range pulls a newer flet with a different API.
 dependencies = [
-    "flet>=0.25.0",
-    "flet-audio>=0.25.0",
-    "flet-video>=0.25.0",
+    "flet==0.86.5",
+    "flet-audio==0.86.5",
+    "flet-video==0.86.5",
     "ytmusicapi>=1.12.0",
     "yt-dlp>=2026.10.26",
     "requests>=2.28.0",
+    "Pillow>=10.0.0",
+    "certifi>=2024.0.0",
 ]
 
 [tool.flet]
@@ -42,6 +46,21 @@ exclude = [
     "src/ui/__pycache__",
     "src/FramePlayer.egg-info",
 ]
+
+[tool.flet.android]
+# Real devices only (x86_64 is emulator-only), one APK per ABI so each device
+# downloads just its own native libs: arm64-v8a for modern phones,
+# armeabi-v7a for older 32-bit tablets / car head units.
+target_arch = ["arm64-v8a", "armeabi-v7a"]
+split_per_abi = true
+# Packages run from inside a zip on Android; ytmusicapi opens its gettext .mo
+# files via Path(__file__), which fails in the zip and breaks YTMusic() (no search).
+extract_packages = ["ytmusicapi"]
+
+[tool.flet.flutter.pubspec.dependency_overrides]
+# The flet 0.86.5 template pins jni 1.0.0, but current shared_preferences_android /
+# jni_flutter bindings assert jni ^1.1.0 (same major, so 1.0-era bindings still work).
+jni = "^1.1.0"
 
 [tool.flet.android.permission]
 "android.permission.READ_EXTERNAL_STORAGE" = true

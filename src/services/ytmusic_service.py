@@ -11,7 +11,7 @@ import threading
 import time
 from typing import List, Optional
 
-from src.music_backend import MOCK_TRACKS, Track
+from src.music_backend import Track
 
 DEFAULT_PLACEHOLDER = "https://raw.githubusercontent.com/mdn/webaudio-examples/main/audio-analyser/viper.mp3"
 STREAM_CACHE_TTL = 3600  # YouTube stream URLs stay valid for several hours
@@ -39,6 +39,7 @@ class YTMusicService:
         self._ydl_lock = threading.Lock()
         self._stream_cache: "OrderedDict[str, tuple[str, float]]" = OrderedDict()
         self._executor = ThreadPoolExecutor(max_workers=1)
+        self.last_search_error: Optional[str] = None  # Shown in the UI when a search fails
 
     def _get_ytmusic(self):
         if self._ytmusic is None:
@@ -49,12 +50,14 @@ class YTMusicService:
 
     def search_tracks(self, query: str, limit: int = 20) -> List[Track]:
         """Searches YouTube Music songs in guest mode (no login, no API quota)."""
+        self.last_search_error = None
         try:
             results = self._get_ytmusic().search(query, filter="songs", limit=limit)
         except Exception as e:
             print(f"[YTMusicService] Guest search failed: {e}")
-            q = query.lower()
-            return [t for t in MOCK_TRACKS if q in t.title.lower() or q in t.artist.lower()]
+            self._ytmusic = None  # Retry a fresh client on the next search
+            self.last_search_error = f"{type(e).__name__}: {e}"
+            return []
 
         tracks = []
         for r in results[:limit]:
