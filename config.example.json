@@ -10,7 +10,5 @@
   "kiosk_fullscreen": true,
   "show_clock_on_photo_frame": false,
   "background_blur_radius": 24,
-  "orientation": "landscape",
-  "oauth_client_id": "",
-  "oauth_client_secret": ""
+  "orientation": "landscape"
 }

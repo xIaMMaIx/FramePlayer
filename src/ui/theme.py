@@ -19,7 +19,6 @@ SURFACE_TRANSLUCENT = "rgba(255, 255, 255, 0.08)"
 SURFACE_GLASS_BORDER = "rgba(255, 255, 255, 0.12)"
 
 ACCENT_RED = "#FF0033"  # YouTube Music Primary Red
-ACCENT_RED_GLOW = "#4DFF0033"  # Glow effect color
 ACCENT_CYAN = "#3EA6FF"  # CarPlay secondary blue/cyan
 ACCENT_GREEN = "#10B981"  # Active / Play green
 
@@ -28,14 +27,11 @@ TEXT_SECONDARY = "#A0A6B2"
 TEXT_MUTED = "#656C7A"
 
 # Touch Sizing & Spacing
-TOUCH_MIN_SIZE = 48
-SIDEBAR_WIDTH = 92
 BORDER_RADIUS_CARD = 18
 BORDER_RADIUS_BUTTON = 14
 BORDER_RADIUS_ROUND = 40
 
-# Typography
-FONT_FAMILY_PRIMARY = "Prompt, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif"
+DEFAULT_ART_URL = "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=600&auto=format&fit=crop&q=80"
 
 
 def glass_card(
@@ -53,7 +49,7 @@ def glass_card(
         padding=padding,
         border_radius=border_radius,
         bgcolor=bgcolor,
-        border=ft.border.all(1, SURFACE_GLASS_BORDER),
+        border=ft.Border.all(1, SURFACE_GLASS_BORDER),
         expand=expand,
         width=width,
         height=height,

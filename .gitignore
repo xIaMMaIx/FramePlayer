@@ -23,3 +23,6 @@ data/cache/
 data/cookies.txt
 .vscode/
 .idea/
+
+# Python packaging metadata
+*.egg-info/

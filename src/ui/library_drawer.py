@@ -7,26 +7,20 @@ Single-screen interface:
 """
 
 import asyncio
-from typing import Any, Callable, Dict, List, Optional
+from typing import Callable, List, Optional
 import flet as ft
 
 from src.music_backend import Track
 from src.services.audio_controller import AudioController
 from src.services.local_playlist_manager import LocalPlaylistManager
-from src.services.oauth_manager import OAuthManager
 from src.services.ytmusic_service import YTMusicService
 from src.ui.theme import (
     ACCENT_CYAN,
     ACCENT_GREEN,
     ACCENT_RED,
-    BORDER_RADIUS_CARD,
-    SURFACE_CARD,
-    SURFACE_ELEVATED,
-    SURFACE_TRANSLUCENT,
     TEXT_MUTED,
     TEXT_PRIMARY,
     TEXT_SECONDARY,
-    glass_card,
 )
 
 
@@ -36,20 +30,16 @@ class LibraryDrawer(ft.Container):
         ytmusic_service: YTMusicService,
         audio_controller: AudioController,
         local_playlist_mgr: LocalPlaylistManager,
-        oauth_manager: Optional[OAuthManager] = None,
         on_playlist_modified: Optional[Callable[[], None]] = None,
         on_track_selected: Optional[Callable[[], None]] = None,
-        on_open_login: Optional[Callable[[], None]] = None,
         on_close: Optional[Callable[[], None]] = None,
         async_runner: Optional[Callable] = None,
     ):
         self.ytmusic_service = ytmusic_service
         self.audio_controller = audio_controller
         self.local_playlist_mgr = local_playlist_mgr
-        self.oauth_manager = oauth_manager
         self.on_playlist_modified = on_playlist_modified or (lambda: None)
         self.on_track_selected = on_track_selected or (lambda: None)
-        self.on_open_login = on_open_login
         self.on_close_callback = on_close
         self.async_runner = async_runner
 
@@ -68,14 +58,14 @@ class LibraryDrawer(ft.Container):
             focused_border_color=ACCENT_RED,
             text_size=13,
             color=TEXT_PRIMARY,
-            content_padding=ft.padding.symmetric(horizontal=14, vertical=10),
+            content_padding=ft.Padding.symmetric(horizontal=14, vertical=10),
             on_submit=self._handle_search,
             expand=True,
             border_radius=10,
         )
 
         self.btn_search = ft.IconButton(
-            icon=ft.icons.SEARCH_ROUNDED,
+            icon=ft.Icons.SEARCH_ROUNDED,
             icon_color=TEXT_PRIMARY,
             bgcolor=ACCENT_RED,
             icon_size=20,
@@ -84,7 +74,7 @@ class LibraryDrawer(ft.Container):
         )
 
         self.btn_clear_search = ft.IconButton(
-            icon=ft.icons.CLEAR_ROUNDED,
+            icon=ft.Icons.CLEAR_ROUNDED,
             icon_color=TEXT_MUTED,
             icon_size=20,
             visible=False,
@@ -105,7 +95,7 @@ class LibraryDrawer(ft.Container):
         # Main Scrollable Content List
         self.content_list = ft.ListView(
             spacing=8,
-            padding=ft.padding.only(right=6, bottom=16),
+            padding=ft.Padding.only(right=6, bottom=16),
             expand=True,
         )
 
@@ -117,7 +107,7 @@ class LibraryDrawer(ft.Container):
                     controls=[
                         ft.Row(
                             [
-                                ft.Icon(ft.icons.PLAYLIST_PLAY_ROUNDED, size=24, color=ACCENT_RED),
+                                ft.Icon(ft.Icons.PLAYLIST_PLAY_ROUNDED, size=24, color=ACCENT_RED),
                                 ft.Text("Manage Playlist", size=18, weight=ft.FontWeight.BOLD, color=TEXT_PRIMARY),
                             ],
                             spacing=8,
@@ -126,7 +116,7 @@ class LibraryDrawer(ft.Container):
                             [
                                 self.spinner,
                                 ft.IconButton(
-                                    icon=ft.icons.CLOSE_ROUNDED,
+                                    icon=ft.Icons.CLOSE_ROUNDED,
                                     icon_color=TEXT_SECONDARY,
                                     icon_size=22,
                                     on_click=lambda e: self.close_drawer(),
@@ -148,30 +138,33 @@ class LibraryDrawer(ft.Container):
             expand=True,
         )
 
-        drawer_box = ft.Container(
+        self.backdrop_area = ft.Container(
+            expand=True,
+            on_click=lambda e: self.close_drawer(),
+        )
+
+        self.drawer_box = ft.Container(
             content=drawer_content,
-            width=580,
+            width=520,
             bgcolor="#131722",
-            border_radius=ft.border_radius.only(top_left=24, bottom_left=24),
-            border=ft.border.all(1.2, "rgba(255, 255, 255, 0.12)"),
-            padding=20,
+            border_radius=ft.BorderRadius(top_left=20, bottom_left=20, top_right=0, bottom_right=0),
+            border=ft.Border.all(1.2, "rgba(255, 255, 255, 0.12)"),
+            padding=16,
             shadow=ft.BoxShadow(spread_radius=8, blur_radius=30, color="rgba(0, 0, 0, 0.8)"),
-            alignment=ft.alignment.center,
+            alignment=ft.Alignment.CENTER,
+        )
+
+        self.drawer_row = ft.Row(
+            controls=[
+                self.backdrop_area,
+                self.drawer_box,
+            ],
+            expand=True,
+            spacing=0,
         )
 
         super().__init__(
-            content=ft.Row(
-                controls=[
-                    # Translucent backdrop barrier to close on tap outside
-                    ft.Container(
-                        expand=True,
-                        on_click=lambda e: self.close_drawer(),
-                    ),
-                    drawer_box,
-                ],
-                expand=True,
-                spacing=0,
-            ),
+            content=self.drawer_row,
             bgcolor="rgba(0, 0, 0, 0.65)",
             expand=True,
             visible=False,
@@ -179,17 +172,42 @@ class LibraryDrawer(ft.Container):
 
     def open_drawer(self) -> None:
         self.visible = True
+
+        # Adaptive width for 9:16 Portrait vs 16:9 Landscape
+        try:
+            page_w = getattr(self.page, "width", None) if getattr(self, "page", None) else None
+            if page_w and page_w < 600:
+                # Mobile / Tablet 9:16 Portrait mode
+                self.backdrop_area.visible = False
+                self.drawer_box.width = None
+                self.drawer_box.expand = True
+                self.drawer_box.border_radius = ft.BorderRadius(0, 0, 0, 0)
+                self.drawer_box.padding = 12
+            else:
+                # Landscape / Desktop mode
+                self.backdrop_area.visible = True
+                self.drawer_box.width = min(540, int(page_w * 0.7)) if page_w else 520
+                self.drawer_box.expand = False
+                self.drawer_box.border_radius = ft.BorderRadius(top_left=20, bottom_left=20, top_right=0, bottom_right=0)
+                self.drawer_box.padding = 16
+        except Exception:
+            pass
+
         if self._is_searching:
             self._render_search_results()
         else:
             self._render_local_playlist()
-        if getattr(self, "page", None):
+        try:
             self.update()
+        except Exception:
+            pass
 
     def close_drawer(self) -> None:
         self.visible = False
-        if getattr(self, "page", None):
+        try:
             self.update()
+        except Exception:
+            pass
         if self.on_close_callback:
             self.on_close_callback()
 
@@ -202,7 +220,7 @@ class LibraryDrawer(ft.Container):
     # ─── Local Playlist View ──────────────────────────────────────────
 
     def _render_local_playlist(self) -> None:
-        """Renders the local saved playlist with Play All header and Delete buttons."""
+        """Renders the local saved playlist with Play All header and Reorderable list."""
         self.content_list.controls.clear()
         tracks = self.local_playlist_mgr.get_tracks()
 
@@ -211,18 +229,18 @@ class LibraryDrawer(ft.Container):
             controls=[
                 ft.Row(
                     [
-                        ft.Icon(ft.icons.QUEUE_MUSIC_ROUNDED, size=18, color=ACCENT_RED),
-                        ft.Text(f"My Playlist ({len(tracks)} tracks)", size=14, weight=ft.FontWeight.BOLD, color=TEXT_PRIMARY),
+                        ft.Icon(ft.Icons.QUEUE_MUSIC_ROUNDED, size=18, color=ACCENT_RED),
+                        ft.Text(f"My Playlist ({len(tracks)})", size=14, weight=ft.FontWeight.BOLD, color=TEXT_PRIMARY),
                     ],
-                    spacing=6,
+                    spacing=4,
                 ),
                 ft.ElevatedButton(
-                    content=ft.Row([ft.Icon(ft.icons.PLAY_ARROW_ROUNDED, size=16), ft.Text("Play All", weight=ft.FontWeight.BOLD)]),
+                    content=ft.Row([ft.Icon(ft.Icons.PLAY_ARROW_ROUNDED, size=15), ft.Text("Play All", size=12, weight=ft.FontWeight.BOLD)], spacing=4),
                     bgcolor=ACCENT_RED,
                     color=TEXT_PRIMARY,
                     style=ft.ButtonStyle(
                         shape=ft.RoundedRectangleBorder(radius=8),
-                        padding=ft.padding.symmetric(horizontal=12, vertical=8),
+                        padding=ft.Padding.symmetric(horizontal=10, vertical=6),
                     ),
                     on_click=lambda e: self._play_all_local_tracks(),
                     disabled=(len(tracks) == 0),
@@ -238,75 +256,104 @@ class LibraryDrawer(ft.Container):
                 ft.Container(
                     content=ft.Column(
                         [
-                            ft.Icon(ft.icons.PLAYLIST_ADD_ROUNDED, size=46, color=TEXT_MUTED),
+                            ft.Icon(ft.Icons.PLAYLIST_ADD_ROUNDED, size=46, color=TEXT_MUTED),
                             ft.Text("Your local playlist is empty.", size=14, color=TEXT_SECONDARY, weight=ft.FontWeight.BOLD),
                             ft.Text("Use the search bar above to find and add songs from YouTube!", size=12, color=TEXT_MUTED),
                         ],
                         horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                         spacing=6,
                     ),
-                    alignment=ft.alignment.center,
+                    alignment=ft.Alignment.CENTER,
                     padding=40,
                 )
             )
         else:
+            reorder_list = ft.ReorderableListView(
+                spacing=6,
+                expand=True,
+                show_default_drag_handles=False,
+                on_reorder=self._handle_playlist_reorder,
+            )
             for idx, track in enumerate(tracks):
                 tile = self._build_local_track_tile(track, tracks, idx)
-                self.content_list.controls.append(tile)
+                reorder_list.controls.append(tile)
+            self.content_list.controls.append(reorder_list)
 
-        if getattr(self, "page", None):
+        try:
             self.update()
+        except Exception:
+            pass
 
     def _build_local_track_tile(self, track: Track, tracks: List[Track], index: int) -> ft.Container:
-        """Constructs list tile for local playlist with Play and Delete actions."""
+        """Constructs list tile for local playlist with Drag Handle, Play and Delete actions."""
         return ft.Container(
+            key=f"pl_track_{track.id}_{index}",
             content=ft.Row(
                 controls=[
+                    # Drag Handle for Reordering
+                    ft.ReorderableDragHandle(
+                        content=ft.Container(
+                            content=ft.Icon(ft.Icons.DRAG_HANDLE_ROUNDED, size=18, color=TEXT_MUTED),
+                            padding=ft.Padding.only(right=2),
+                        ),
+                        mouse_cursor=ft.MouseCursor.GRAB,
+                    ),
                     ft.Image(
                         src=track.art_url or "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=200&q=80",
-                        width=44,
-                        height=44,
-                        border_radius=8,
-                        fit=ft.ImageFit.COVER,
+                        width=40,
+                        height=40,
+                        border_radius=6,
+                        fit=ft.BoxFit.COVER,
                     ),
-                    ft.Container(width=4),
+                    ft.Container(width=2),
                     ft.Column(
                         controls=[
-                            ft.Text(track.title, size=13, weight=ft.FontWeight.BOLD, color=TEXT_PRIMARY, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
-                            ft.Text(track.artist, size=11, color=TEXT_SECONDARY, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                            ft.Text(track.title, size=12, weight=ft.FontWeight.BOLD, color=TEXT_PRIMARY, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                            ft.Text(track.artist, size=10, color=TEXT_SECONDARY, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
                         ],
-                        spacing=2,
+                        spacing=1,
                         expand=True,
                     ),
-                    ft.Text(track.formatted_duration, size=11, color=TEXT_MUTED),
+                    ft.Text(track.formatted_duration, size=10, color=TEXT_MUTED),
                     # Play Button
                     ft.IconButton(
-                        icon=ft.icons.PLAY_CIRCLE_FILLED_ROUNDED,
+                        icon=ft.Icons.PLAY_CIRCLE_FILLED_ROUNDED,
                         icon_color=ACCENT_RED,
-                        icon_size=28,
+                        icon_size=24,
                         on_click=lambda e, q=tracks, i=index: self._play_tracks_queue(q, i),
                         tooltip="Play this track",
                     ),
                     # Delete Button
                     ft.IconButton(
-                        icon=ft.icons.DELETE_OUTLINE_ROUNDED,
+                        icon=ft.Icons.DELETE_OUTLINE_ROUNDED,
                         icon_color="rgba(255, 100, 100, 0.8)",
-                        icon_size=22,
+                        icon_size=20,
                         on_click=lambda e, t_id=track.id: self._handle_delete_track(t_id),
                         tooltip="Remove from Local Playlist",
                     ),
                 ],
                 alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                spacing=8,
+                spacing=4,
             ),
-            padding=ft.padding.symmetric(horizontal=10, vertical=6),
-            border_radius=10,
+            padding=ft.Padding.symmetric(horizontal=6, vertical=4),
+            border_radius=8,
             bgcolor="rgba(255, 255, 255, 0.03)",
-            border=ft.border.all(1, "rgba(255, 255, 255, 0.06)"),
+            border=ft.Border.all(1, "rgba(255, 255, 255, 0.06)"),
             ink=True,
             on_click=lambda e, q=tracks, i=index: self._play_tracks_queue(q, i),
         )
+
+    def _handle_playlist_reorder(self, e: ft.OnReorderEvent) -> None:
+        old_idx = e.old_index
+        new_idx = e.new_index
+        if old_idx is None or new_idx is None or old_idx == new_idx:
+            return
+
+        self.local_playlist_mgr.reorder_track(old_idx, new_idx)
+        if self.on_playlist_modified:
+            self.on_playlist_modified()
+        self._render_local_playlist()
 
     def _handle_delete_track(self, track_id: str) -> None:
         """Deletes track from local storage and refreshes drawer + home screen."""
@@ -343,8 +390,10 @@ class LibraryDrawer(ft.Container):
     async def _run_search(self, query: str) -> None:
         self.spinner.visible = True
         self.content_list.controls.clear()
-        if getattr(self, "page", None):
+        try:
             self.update()
+        except Exception:
+            pass
 
         loop = asyncio.get_event_loop()
         tracks = await loop.run_in_executor(None, self.ytmusic_service.search_tracks, query, 30)
@@ -360,13 +409,13 @@ class LibraryDrawer(ft.Container):
             controls=[
                 ft.Row(
                     [
-                        ft.Icon(ft.icons.SEARCH_ROUNDED, size=18, color=ACCENT_CYAN),
+                        ft.Icon(ft.Icons.SEARCH_ROUNDED, size=18, color=ACCENT_CYAN),
                         ft.Text(f"Search Results ({len(self._search_results)} found)", size=14, weight=ft.FontWeight.BOLD, color=TEXT_PRIMARY),
                     ],
                     spacing=6,
                 ),
                 ft.TextButton(
-                    content=ft.Row([ft.Icon(ft.icons.ARROW_BACK_ROUNDED, size=16), ft.Text("Back to My Playlist")]),
+                    content=ft.Row([ft.Icon(ft.Icons.ARROW_BACK_ROUNDED, size=16), ft.Text("Back to My Playlist")]),
                     style=ft.ButtonStyle(color=TEXT_SECONDARY),
                     on_click=self._handle_clear_search,
                 ),
@@ -381,13 +430,13 @@ class LibraryDrawer(ft.Container):
                 ft.Container(
                     content=ft.Column(
                         [
-                            ft.Icon(ft.icons.SEARCH_OFF_ROUNDED, size=40, color=TEXT_MUTED),
+                            ft.Icon(ft.Icons.SEARCH_OFF_ROUNDED, size=40, color=TEXT_MUTED),
                             ft.Text("No songs found. Try a different search term.", size=13, color=TEXT_MUTED),
                         ],
                         horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                         spacing=6,
                     ),
-                    alignment=ft.alignment.center,
+                    alignment=ft.Alignment.CENTER,
                     padding=40,
                 )
             )
@@ -396,17 +445,19 @@ class LibraryDrawer(ft.Container):
                 tile = self._build_search_result_tile(track, self._search_results, idx)
                 self.content_list.controls.append(tile)
 
-        if getattr(self, "page", None):
+        try:
             self.update()
+        except Exception:
+            pass
 
     def _build_search_result_tile(self, track: Track, results: List[Track], index: int) -> ft.Container:
         """Constructs search result tile with Play and Add to Playlist buttons."""
         is_already_added = self.local_playlist_mgr.has_track(track.id)
 
         btn_add = ft.IconButton(
-            icon=ft.icons.CHECK_CIRCLE_ROUNDED if is_already_added else ft.icons.ADD_CIRCLE_OUTLINE_ROUNDED,
+            icon=ft.Icons.CHECK_CIRCLE_ROUNDED if is_already_added else ft.Icons.ADD_CIRCLE_OUTLINE_ROUNDED,
             icon_color=ACCENT_GREEN if is_already_added else ACCENT_CYAN,
-            icon_size=28,
+            icon_size=24,
             on_click=lambda e, t=track: self._handle_add_track_to_playlist(t),
             tooltip="In Playlist" if is_already_added else "Add to My Playlist",
         )
@@ -416,26 +467,26 @@ class LibraryDrawer(ft.Container):
                 controls=[
                     ft.Image(
                         src=track.art_url or "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=200&q=80",
-                        width=44,
-                        height=44,
-                        border_radius=8,
-                        fit=ft.ImageFit.COVER,
+                        width=40,
+                        height=40,
+                        border_radius=6,
+                        fit=ft.BoxFit.COVER,
                     ),
-                    ft.Container(width=4),
+                    ft.Container(width=2),
                     ft.Column(
                         controls=[
-                            ft.Text(track.title, size=13, weight=ft.FontWeight.BOLD, color=TEXT_PRIMARY, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
-                            ft.Text(track.artist, size=11, color=TEXT_SECONDARY, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                            ft.Text(track.title, size=12, weight=ft.FontWeight.BOLD, color=TEXT_PRIMARY, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                            ft.Text(track.artist, size=10, color=TEXT_SECONDARY, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
                         ],
-                        spacing=2,
+                        spacing=1,
                         expand=True,
                     ),
-                    ft.Text(track.formatted_duration, size=11, color=TEXT_MUTED),
+                    ft.Text(track.formatted_duration, size=10, color=TEXT_MUTED),
                     # Play Preview Button
                     ft.IconButton(
-                        icon=ft.icons.PLAY_CIRCLE_FILLED_ROUNDED,
+                        icon=ft.Icons.PLAY_CIRCLE_FILLED_ROUNDED,
                         icon_color=ACCENT_RED,
-                        icon_size=28,
+                        icon_size=24,
                         on_click=lambda e, q=results, i=index: self._play_tracks_queue(q, i),
                         tooltip="Play Preview",
                     ),
@@ -444,12 +495,12 @@ class LibraryDrawer(ft.Container):
                 ],
                 alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                spacing=8,
+                spacing=4,
             ),
-            padding=ft.padding.symmetric(horizontal=10, vertical=6),
-            border_radius=10,
+            padding=ft.Padding.symmetric(horizontal=6, vertical=4),
+            border_radius=8,
             bgcolor="rgba(255, 255, 255, 0.03)",
-            border=ft.border.all(1, "rgba(255, 255, 255, 0.06)"),
+            border=ft.Border.all(1, "rgba(255, 255, 255, 0.06)"),
         )
 
     def _handle_add_track_to_playlist(self, track: Track) -> None:

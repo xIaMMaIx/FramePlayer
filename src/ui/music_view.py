@@ -6,41 +6,21 @@ Features Split-View layout:
          Jumbo Touch Controls, Seek Slider, Volume, and Upcoming Queue list.
 """
 
-import base64
-import io
-from pathlib import Path
-import re
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Optional
 import flet as ft
-try:
-    from PIL import Image, ImageFilter, ImageEnhance
-except ImportError:
-    Image = None
-    ImageFilter = None
-    ImageEnhance = None
-import requests
 
 from src.config_manager import ConfigManager
-from src.music_backend import BaseMusicBackend, Track
-from src.services.oauth_manager import OAuthManager
+from src.music_backend import BaseMusicBackend
 from src.state import AppState
 from src.ui.theme import (
-    ACCENT_CYAN,
-    ACCENT_GREEN,
     ACCENT_RED,
-    BORDER_RADIUS_CARD,
     BORDER_RADIUS_ROUND,
     SURFACE_CARD,
-    SURFACE_ELEVATED,
-    SURFACE_TRANSLUCENT,
     TEXT_MUTED,
     TEXT_PRIMARY,
     TEXT_SECONDARY,
     glass_card,
-)
-
-TRANSPARENT_IMAGE_BASE64 = (
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+    DEFAULT_ART_URL,
 )
 
 
@@ -49,47 +29,34 @@ class MusicPlayerView(ft.Container):
         self,
         state: AppState,
         backend: BaseMusicBackend,
-        oauth_manager: Optional[OAuthManager] = None,
         config_mgr: Optional[ConfigManager] = None,
         on_interaction: Optional[Callable[[], None]] = None,
         on_open_library: Optional[Callable[[], None]] = None,
-        on_open_login: Optional[Callable[[], None]] = None,
         on_open_photos: Optional[Callable[[], None]] = None,
         on_open_settings: Optional[Callable[[], None]] = None,
+        on_queue_reorder: Optional[Callable[[int, int], None]] = None,
     ):
         super().__init__(expand=True)
         self.state = state
+        self.on_queue_reorder = on_queue_reorder
         self.backend = backend
-        self.oauth_manager = oauth_manager
         self.config_mgr = config_mgr
         self.on_interaction = on_interaction or (lambda: None)
         self.on_open_library = on_open_library
-        self.on_open_login = on_open_login
         self.on_open_photos = on_open_photos
         self.on_open_settings = on_open_settings
         self._is_user_seeking = False
-        self._art_blur_cache: Dict[str, str] = {}
-
-        self.img_art_blur = ft.Image(
-            src_base64=self._get_blurred_cover_art(self._get_default_art()),
-            fit=ft.ImageFit.COVER,
-        )
-
-        self.img_art_sharp_bg = ft.Image(
-            src=self._get_default_art(),
-            fit=ft.ImageFit.COVER,
-        )
 
         self.img_art = ft.Image(
             src=self._get_default_art(),
             aspect_ratio=16 / 9,
-            fit=ft.ImageFit.COVER,
+            fit=ft.BoxFit.COVER,
             border_radius=16,
         )
 
         self.txt_title = ft.Text(
             value="No Track Playing",
-            size=22,
+            size=20,
             weight=ft.FontWeight.W_800,
             color=TEXT_PRIMARY,
             max_lines=1,
@@ -115,70 +82,39 @@ class MusicPlayerView(ft.Container):
         )
 
         self.btn_like = ft.IconButton(
-            icon=ft.icons.FAVORITE_BORDER_ROUNDED,
+            icon=ft.Icons.FAVORITE_BORDER_ROUNDED,
             icon_color=TEXT_SECONDARY,
             icon_size=28,
             on_click=self._handle_like_toggle,
             tooltip="Add to Liked Songs",
         )
 
-        # --- Right Panel: Quick Actions Toolbar (Icon-Only) ---
-        self.btn_account_action = ft.Container(
-            content=ft.Icon(ft.icons.LOCK_OPEN_ROUNDED, size=20, color=TEXT_PRIMARY),
-            padding=8,
-            border_radius=10,
-            bgcolor=ACCENT_RED,
-            ink=True,
-            on_click=lambda e: self.on_open_login() if self.on_open_login else None,
-            tooltip="Sign in to YouTube Music via QR Code",
-        )
-
-        self.btn_quick_library = ft.Container(
-            content=ft.Icon(ft.icons.PLAYLIST_PLAY_ROUNDED, size=22, color=ACCENT_RED),
-            padding=8,
-            border_radius=10,
-            bgcolor="rgba(255, 0, 51, 0.15)",
-            border=ft.border.all(1.2, "rgba(255, 0, 51, 0.4)"),
-            ink=True,
-            on_click=lambda e: self.on_open_library() if self.on_open_library else None,
-            tooltip="Manage Local Playlist, Search & Add Songs",
-        )
-
-        self.btn_quick_photos = ft.Container(
-            content=ft.Icon(ft.icons.PHOTO_LIBRARY_ROUNDED, size=20, color=ACCENT_CYAN),
-            padding=8,
-            border_radius=10,
-            bgcolor="rgba(62, 166, 255, 0.15)",
-            border=ft.border.all(1.2, "rgba(62, 166, 255, 0.4)"),
-            ink=True,
-            on_click=lambda e: self.on_open_photos() if self.on_open_photos else None,
-            tooltip="Launch Photo Slideshow Screensaver",
-        )
-
-        self.btn_quick_settings = ft.Container(
-            content=ft.Icon(ft.icons.SETTINGS_ROUNDED, size=20, color=TEXT_SECONDARY),
-            padding=8,
-            border_radius=10,
-            bgcolor="rgba(255, 255, 255, 0.06)",
-            border=ft.border.all(1, "rgba(255, 255, 255, 0.15)"),
-            ink=True,
-            on_click=lambda e: self.on_open_settings() if self.on_open_settings else None,
-            tooltip="Open Settings",
+        # --- Right Panel: Quick Actions Toolbar (PopupMenu) ---
+        self.settings_menu = ft.PopupMenuButton(
+            icon=ft.Icons.SETTINGS_ROUNDED,
+            items=[
+                ft.PopupMenuItem(icon=ft.Icons.PLAYLIST_PLAY_ROUNDED, content="Library & Queue", on_click=lambda e: self.on_open_library() if self.on_open_library else None),
+                ft.PopupMenuItem(icon=ft.Icons.PHOTO_LIBRARY_ROUNDED, content="Photo Frame", on_click=lambda e: self.on_open_photos() if self.on_open_photos else None),
+                ft.PopupMenuItem(icon=ft.Icons.SETTINGS_OUTLINED, content="Settings", on_click=lambda e: self.on_open_settings() if self.on_open_settings else None),
+            ],
+            tooltip="Menu"
         )
 
         # --- Right Panel: Controls, Sliders & Mini Queue ---
 
         # 1. Transport Controls
         self.btn_shuffle = ft.IconButton(
-            icon=ft.icons.SHUFFLE_ROUNDED,
+            icon=ft.Icons.SHUFFLE_ROUNDED,
             icon_color=TEXT_MUTED,
-            icon_size=28,
+            icon_size=24,
+            width=48,
+            height=48,
             on_click=self._handle_shuffle,
             tooltip="Shuffle",
         )
 
         self.btn_prev = ft.IconButton(
-            icon=ft.icons.SKIP_PREVIOUS_ROUNDED,
+            icon=ft.Icons.SKIP_PREVIOUS_ROUNDED,
             icon_color=TEXT_PRIMARY,
             icon_size=42,
             on_click=self._handle_prev,
@@ -187,7 +123,7 @@ class MusicPlayerView(ft.Container):
 
         self.btn_play_pause = ft.Container(
             content=ft.Icon(
-                ft.icons.PLAY_ARROW_ROUNDED,
+                ft.Icons.PLAY_ARROW_ROUNDED,
                 size=44,
                 color=TEXT_PRIMARY,
             ),
@@ -195,7 +131,7 @@ class MusicPlayerView(ft.Container):
             height=68,
             border_radius=BORDER_RADIUS_ROUND,
             bgcolor=ACCENT_RED,
-            alignment=ft.alignment.center,
+            alignment=ft.Alignment.CENTER,
             ink=True,
             on_click=self._handle_play_pause,
             shadow=ft.BoxShadow(
@@ -206,7 +142,7 @@ class MusicPlayerView(ft.Container):
         )
 
         self.btn_next = ft.IconButton(
-            icon=ft.icons.SKIP_NEXT_ROUNDED,
+            icon=ft.Icons.SKIP_NEXT_ROUNDED,
             icon_color=TEXT_PRIMARY,
             icon_size=42,
             on_click=self._handle_next,
@@ -214,9 +150,11 @@ class MusicPlayerView(ft.Container):
         )
 
         self.btn_repeat = ft.IconButton(
-            icon=ft.icons.REPEAT_ROUNDED,
+            icon=ft.Icons.REPEAT_ROUNDED,
             icon_color=TEXT_MUTED,
-            icon_size=28,
+            icon_size=24,
+            width=48,
+            height=48,
             on_click=self._handle_repeat,
             tooltip="Repeat Mode",
         )
@@ -235,8 +173,13 @@ class MusicPlayerView(ft.Container):
             on_change_end=self._handle_seek_end,
         )
 
-        # 3. Mini Queue List
-        self.queue_column = ft.Column(spacing=6, scroll=ft.ScrollMode.AUTO)
+        # 3. Mini Queue List (Reorderable)
+        self.queue_column = ft.ReorderableListView(
+            spacing=6,
+            expand=True,
+            show_default_drag_handles=False,
+            on_reorder=self._handle_queue_reorder,
+        )
 
         # Build responsive layout (Landscape vs Portrait)
         super().__init__(
@@ -252,63 +195,7 @@ class MusicPlayerView(ft.Container):
         self.update_view()
 
     def _get_default_art(self) -> str:
-        return "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=600&auto=format&fit=crop&q=80"
-
-    def _get_blurred_cover_art(self, art_url: Optional[str]) -> Optional[str]:
-        """Generates Gaussian-blurred base64 cover art with user-configured blur radius."""
-        if not Image or not art_url:
-            return None
-
-        radius = self.config_mgr.get("background_blur_radius", 24) if self.config_mgr else 24
-        cache_key = f"{art_url}_{radius}"
-        if cache_key in self._art_blur_cache:
-            return self._art_blur_cache[cache_key]
-
-        try:
-            resp = requests.get(art_url, timeout=4)
-            if resp.status_code == 200:
-                with Image.open(io.BytesIO(resp.content)) as img:
-                    img = img.convert("RGB")
-                    w, h = img.size
-
-                    if h > 0 and (w / h) < 1.6:
-                        crop_top = int(h * 0.12)
-                        crop_bottom = int(h * 0.88)
-                        img = img.crop((0, crop_top, w, crop_bottom))
-
-                    enhancer = ImageEnhance.Color(img)
-                    img = enhancer.enhance(1.40)
-                    bright = ImageEnhance.Brightness(img)
-                    img = bright.enhance(1.15)
-
-                    bg = img.resize((380, 520), Image.Resampling.BILINEAR)
-                    blurred = bg.filter(ImageFilter.GaussianBlur(radius=radius))
-                    buf = io.BytesIO()
-                    blurred.save(buf, format="JPEG", quality=85)
-                    b64_str = base64.b64encode(buf.getvalue()).decode("utf-8")
-                    self._art_blur_cache[cache_key] = b64_str
-                    return b64_str
-        except Exception as e:
-            print(f"[MusicView] Error generating blurred art base64: {e}")
-
-        return None
-
-    def _refresh_account_button(self) -> None:
-        """Refreshes the Connect YouTube / Account button based on auth state (Icon-only)."""
-        is_logged_in = self.oauth_manager.is_authenticated() if self.oauth_manager else False
-
-        if is_logged_in:
-            self.btn_account_action.content = ft.Icon(ft.icons.CHECK_CIRCLE_ROUNDED, size=20, color=ACCENT_GREEN)
-            self.btn_account_action.bgcolor = "rgba(0, 230, 118, 0.15)"
-            self.btn_account_action.border = ft.border.all(1.2, "rgba(0, 230, 118, 0.4)")
-            self.btn_account_action.on_click = lambda e: self.on_open_settings() if self.on_open_settings else None
-            self.btn_account_action.tooltip = "Connected to YouTube Music. Tap to manage."
-        else:
-            self.btn_account_action.content = ft.Icon(ft.icons.LOCK_OPEN_ROUNDED, size=20, color=TEXT_PRIMARY)
-            self.btn_account_action.bgcolor = ACCENT_RED
-            self.btn_account_action.border = None
-            self.btn_account_action.on_click = lambda e: self.on_open_login() if self.on_open_login else None
-            self.btn_account_action.tooltip = "Sign in to YouTube Music via QR Code"
+        return DEFAULT_ART_URL
 
     def rebuild_layout(self) -> None:
         """Dynamically rebuilds layout with 16:9 widescreen cover art and separated controls."""
@@ -346,65 +233,56 @@ class MusicPlayerView(ft.Container):
         )
 
         # Single Combined Inline Controls & Seeker Row (Compact layout)
-        compact_controls_row = ft.Row(
+        
+        # Timeline Row
+        timeline_row = ft.Row(
             controls=[
-                ft.Row(
-                    controls=[
-                        self.btn_shuffle,
-                        self.btn_prev,
-                        self.btn_play_pause,
-                        self.btn_next,
-                        self.btn_repeat,
-                    ],
-                    spacing=2 if is_portrait else 4,
-                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                ),
                 self.txt_elapsed,
                 ft.Container(content=self.slider_progress, expand=True),
                 self.txt_total,
             ],
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            spacing=6 if is_portrait else 10,
+            spacing=10,
         )
 
-        # Dedicated Controls Card (Expands to bottom in landscape, controls stay top-aligned)
-        controls_card = glass_card(
+        # Playback Buttons Row
+        playback_btns_row = ft.Row(
+            controls=[
+                self.btn_shuffle,
+                self.btn_prev,
+                self.btn_play_pause,
+                self.btn_next,
+                self.btn_repeat,
+            ],
+            spacing=8 if is_portrait else 16,
+            alignment=ft.MainAxisAlignment.CENTER,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+
+        compact_controls_row = ft.Column(
+            controls=[timeline_row, playback_btns_row],
+            spacing=2,
+        )
+
+
+
+        # Unified Player Card (Artwork + Controls)
+        player_card = glass_card(
             content=ft.Column(
                 controls=[
+                    art_card,
+                    ft.Container(height=0),
                     info_row,
+                    ft.Divider(color="rgba(255, 255, 255, 0.08)", height=8),
                     compact_controls_row,
                 ],
-                alignment=ft.MainAxisAlignment.START,
-                spacing=8 if is_portrait else 12,
+                spacing=4,
+                expand=True if not is_portrait else False,
+                scroll=ft.ScrollMode.AUTO,
             ),
-            padding=12 if is_portrait else 16,
-            expand=True if not is_portrait else False,
-            bgcolor=SURFACE_CARD,
-        )
-
-        # Top Quick Actions Toolbar
-        quick_actions_row = ft.Row(
-            controls=[
-                ft.Row(
-                    [
-                        ft.Icon(ft.icons.MUSIC_NOTE_ROUNDED, size=20, color=ACCENT_RED),
-                        ft.Text("YouTube Music", size=15, weight=ft.FontWeight.W_800, color=TEXT_PRIMARY),
-                    ],
-                    spacing=6,
-                ),
-                ft.Row(
-                    [
-                        self.btn_account_action,
-                        self.btn_quick_library,
-                        self.btn_quick_photos,
-                        self.btn_quick_settings,
-                    ],
-                    spacing=8,
-                ),
-            ],
-            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            padding=ft.Padding(16, 12, 16, 12) if not is_portrait else ft.Padding(12, 12, 12, 12),
+            expand=1 if not is_portrait else False,
         )
 
         # Upcoming Queue Header
@@ -412,12 +290,19 @@ class MusicPlayerView(ft.Container):
             controls=[
                 ft.Row(
                     [
-                        ft.Icon(ft.icons.QUEUE_MUSIC_ROUNDED, size=18, color=ACCENT_RED),
+                        ft.Icon(ft.Icons.QUEUE_MUSIC_ROUNDED, size=18, color=ACCENT_RED),
                         ft.Text("Upcoming Queue", size=15, weight=ft.FontWeight.BOLD, color=TEXT_PRIMARY),
                     ],
                     spacing=6,
                 ),
-                ft.Text(f"{len(self.backend.queue)} tracks", size=12, color=TEXT_MUTED),
+                ft.Row(
+                    [
+                        ft.Text(f"{len(self.backend.queue)} tracks", size=12, color=TEXT_MUTED),
+                        self.settings_menu,
+                    ],
+                    spacing=12,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                )
             ],
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -436,8 +321,6 @@ class MusicPlayerView(ft.Container):
         queue_panel = glass_card(
             content=ft.Column(
                 controls=[
-                    quick_actions_row,
-                    ft.Divider(color="rgba(255, 255, 255, 0.08)", height=12),
                     queue_header,
                     queue_card,
                 ],
@@ -453,19 +336,18 @@ class MusicPlayerView(ft.Container):
             # Sizing for portrait (Compact inline buttons)
             self.txt_title.size = 16
             self.txt_artist.size = 12
-            self.btn_play_pause.width = 44
-            self.btn_play_pause.height = 44
+            self.btn_play_pause.width = 52
+            self.btn_play_pause.height = 52
             if hasattr(self.btn_play_pause.content, "size"):
                 self.btn_play_pause.content.size = 26
-            self.btn_prev.icon_size = 24
-            self.btn_next.icon_size = 24
-            self.btn_shuffle.icon_size = 16
-            self.btn_repeat.icon_size = 16
+            self.btn_prev.icon_size = 28
+            self.btn_next.icon_size = 28
+            self.btn_shuffle.icon_size = 22
+            self.btn_repeat.icon_size = 22
 
             self.content = ft.Column(
                 controls=[
-                    art_card,
-                    controls_card,
+                    player_card,
                     queue_panel,
                 ],
                 spacing=10,
@@ -475,59 +357,62 @@ class MusicPlayerView(ft.Container):
             # Sizing for landscape (Equal 50/50 left and right split, sleek inline player)
             self.txt_title.size = 20
             self.txt_artist.size = 14
-            self.btn_play_pause.width = 48
-            self.btn_play_pause.height = 48
+            self.btn_play_pause.width = 52
+            self.btn_play_pause.height = 52
             if hasattr(self.btn_play_pause.content, "size"):
-                self.btn_play_pause.content.size = 28
+                self.btn_play_pause.content.size = 26
             self.btn_prev.icon_size = 28
             self.btn_next.icon_size = 28
-            self.btn_shuffle.icon_size = 18
-            self.btn_repeat.icon_size = 18
-
-            left_player_col = ft.Column(
-                controls=[
-                    art_card,
-                    controls_card,
-                ],
-                spacing=12,
-                expand=1,
-            )
+            self.btn_shuffle.icon_size = 22
+            self.btn_repeat.icon_size = 22
 
             self.content = ft.Row(
                 controls=[
-                    left_player_col,
+                    player_card,
                     queue_panel,
                 ],
                 spacing=16,
                 expand=True,
             )
 
-        if getattr(self, "page", None):
-            try:
-                self.update()
-            except Exception:
-                pass
+        try:
+            self.update()
+        except Exception:
+            pass
 
     def _render_queue_list(self) -> None:
-        """Renders upcoming tracks with spaced list tiles and clean thumbnail margins."""
+        """Renders upcoming tracks with drag handles for live reordering."""
         self.queue_column.controls.clear()
         current_track = self.backend.current_track
 
-        for track in self.backend.queue:
+        for idx, track in enumerate(self.backend.queue):
             is_active = current_track and current_track.id == track.id
             item = ft.Container(
+                key=f"queue_track_{track.id}_{idx}",
                 content=ft.Row(
                     controls=[
+                        # Drag handle icon for reordering
+                        ft.ReorderableDragHandle(
+                            content=ft.Container(
+                                content=ft.Icon(
+                                    ft.Icons.DRAG_HANDLE_ROUNDED,
+                                    size=20,
+                                    color=ACCENT_RED if is_active else TEXT_MUTED,
+                                ),
+                                padding=ft.Padding.only(right=2),
+                            ),
+                            mouse_cursor=ft.MouseCursor.GRAB,
+                        ),
                         # Mini thumbnail with rounded border
                         ft.Image(
                             src=track.art_url or self._get_default_art(),
-                            width=48,
-                            height=48,
+                            width=44,
+                            height=44,
                             border_radius=8,
-                            fit=ft.ImageFit.COVER,
+                            fit=ft.BoxFit.COVER,
                         ),
                         # Dedicated spacing container between thumbnail and text
-                        ft.Container(width=6),
+                        ft.Container(width=4),
                         # Track & Artist Column
                         ft.Column(
                             controls=[
@@ -535,8 +420,8 @@ class MusicPlayerView(ft.Container):
                                     track.title,
                                     size=14,
                                     weight=ft.FontWeight.BOLD if is_active else ft.FontWeight.W_500,
-                                    color=ACCENT_RED if is_active else TEXT_PRIMARY,
-                                    max_lines=1,
+                                    color=TEXT_PRIMARY,
+                                    max_lines=2,
                                     overflow=ft.TextOverflow.ELLIPSIS,
                                 ),
                                 ft.Text(
@@ -552,7 +437,7 @@ class MusicPlayerView(ft.Container):
                         ),
                         # Equalizer icon or duration
                         ft.Icon(
-                            ft.icons.EQUALIZER_ROUNDED if is_active else ft.icons.ACCESS_TIME_ROUNDED,
+                            ft.Icons.EQUALIZER_ROUNDED if is_active else ft.Icons.ACCESS_TIME_ROUNDED,
                             size=16,
                             color=ACCENT_RED if is_active else TEXT_MUTED,
                         ),
@@ -565,18 +450,30 @@ class MusicPlayerView(ft.Container):
                     ],
                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                    spacing=8,
+                    spacing=6,
                 ),
-                padding=ft.padding.symmetric(horizontal=12, vertical=8),
+                padding=ft.Padding.symmetric(horizontal=10, vertical=8),
                 border_radius=10,
                 bgcolor="rgba(255, 0, 51, 0.12)" if is_active else "rgba(255, 255, 255, 0.03)",
-                border=ft.border.all(1, "rgba(255, 0, 51, 0.4)") if is_active else None,
+                border=ft.Border.all(1, "rgba(255, 0, 51, 0.4)") if is_active else None,
                 ink=True,
                 on_click=lambda e, t_id=track.id: self._handle_track_select(t_id),
             )
             self.queue_column.controls.append(item)
 
     # --- Event Handlers ---
+
+    def _handle_queue_reorder(self, e: ft.OnReorderEvent) -> None:
+        self.on_interaction()
+        old_idx = e.old_index
+        new_idx = e.new_index
+        if old_idx is None or new_idx is None or old_idx == new_idx:
+            return
+
+        self.backend.reorder_queue(old_idx, new_idx)
+        if hasattr(self, "on_queue_reorder") and self.on_queue_reorder:
+            self.on_queue_reorder(old_idx, new_idx)
+        self.update_view()
 
     def _handle_track_select(self, track_id: str) -> None:
         self.on_interaction()
@@ -620,13 +517,13 @@ class MusicPlayerView(ft.Container):
         self.on_interaction()
         mode = self.backend.cycle_repeat()
         if mode == "one":
-            self.btn_repeat.icon = ft.icons.REPEAT_ONE_ROUNDED
+            self.btn_repeat.icon = ft.Icons.REPEAT_ONE_ROUNDED
             self.btn_repeat.icon_color = ACCENT_RED
         elif mode == "all":
-            self.btn_repeat.icon = ft.icons.REPEAT_ROUNDED
+            self.btn_repeat.icon = ft.Icons.REPEAT_ROUNDED
             self.btn_repeat.icon_color = ACCENT_RED
         else:
-            self.btn_repeat.icon = ft.icons.REPEAT_ROUNDED
+            self.btn_repeat.icon = ft.Icons.REPEAT_ROUNDED
             self.btn_repeat.icon_color = TEXT_MUTED
         if getattr(self.btn_repeat, "page", None):
             self.btn_repeat.update()
@@ -634,7 +531,7 @@ class MusicPlayerView(ft.Container):
     def _handle_like_toggle(self, e) -> None:
         self.on_interaction()
         is_liked = self.backend.toggle_like()
-        self.btn_like.icon = ft.icons.FAVORITE_ROUNDED if is_liked else ft.icons.FAVORITE_BORDER_ROUNDED
+        self.btn_like.icon = ft.Icons.FAVORITE_ROUNDED if is_liked else ft.Icons.FAVORITE_BORDER_ROUNDED
         self.btn_like.icon_color = ACCENT_RED if is_liked else TEXT_SECONDARY
         if getattr(self.btn_like, "page", None):
             self.btn_like.update()
@@ -654,18 +551,9 @@ class MusicPlayerView(ft.Container):
         track = self.backend.current_track
         is_playing = self.backend.is_playing
 
-        self._refresh_account_button()
-
         if track:
             art_src = track.art_url or self._get_default_art()
             self.img_art.src = art_src
-            self.img_art_sharp_bg.src = art_src
-            b64 = self._get_blurred_cover_art(track.art_url)
-            self.img_art_blur.src_base64 = b64
-            try:
-                self.img_art_blur.update()
-            except Exception:
-                pass
             
             self.txt_title.value = track.title
             self.txt_artist.value = track.artist
@@ -673,30 +561,28 @@ class MusicPlayerView(ft.Container):
             self.txt_total.value = track.formatted_duration
             self.slider_progress.max = max(1.0, track.duration_seconds)
             self.btn_like.icon = (
-                ft.icons.FAVORITE_ROUNDED if getattr(track, "is_liked", False) else ft.icons.FAVORITE_BORDER_ROUNDED
+                ft.Icons.FAVORITE_ROUNDED if getattr(track, "is_liked", False) else ft.Icons.FAVORITE_BORDER_ROUNDED
             )
             self.btn_like.icon_color = ACCENT_RED if getattr(track, "is_liked", False) else TEXT_SECONDARY
 
         # Play/Pause Icon
         icon_ctrl = self.btn_play_pause.content
-        icon_ctrl.name = ft.icons.PAUSE_ROUNDED if is_playing else ft.icons.PLAY_ARROW_ROUNDED
+        if hasattr(icon_ctrl, "icon"):
+            icon_ctrl.icon = ft.Icons.PAUSE_ROUNDED if is_playing else ft.Icons.PLAY_ARROW_ROUNDED
+        elif hasattr(icon_ctrl, "name"):
+            icon_ctrl.name = ft.Icons.PAUSE_ROUNDED if is_playing else ft.Icons.PLAY_ARROW_ROUNDED
 
         # Shuffle & Repeat Highlights
         self.btn_shuffle.icon_color = ACCENT_RED if self.backend.shuffle else TEXT_MUTED
         if self.backend.repeat == "one":
-            self.btn_repeat.icon = ft.icons.REPEAT_ONE_ROUNDED
+            self.btn_repeat.icon = ft.Icons.REPEAT_ONE_ROUNDED
             self.btn_repeat.icon_color = ACCENT_RED
         elif self.backend.repeat == "all":
-            self.btn_repeat.icon = ft.icons.REPEAT_ROUNDED
+            self.btn_repeat.icon = ft.Icons.REPEAT_ROUNDED
             self.btn_repeat.icon_color = ACCENT_RED
         else:
-            self.btn_repeat.icon = ft.icons.REPEAT_ROUNDED
+            self.btn_repeat.icon = ft.Icons.REPEAT_ROUNDED
             self.btn_repeat.icon_color = TEXT_MUTED
-
-        try:
-            self.update()
-        except Exception:
-            pass
 
         # Update progress if not currently being scrubbed
         if not self._is_user_seeking:
@@ -707,15 +593,14 @@ class MusicPlayerView(ft.Container):
             self.txt_elapsed.value = f"{mins:02d}:{secs:02d}"
 
         self._render_queue_list()
-        if getattr(self, "page", None):
-            try:
-                self.update()
-            except Exception:
-                pass
+        try:
+            self.update()
+        except Exception:
+            pass
 
     def update_progress_only(self) -> None:
         """Lightweight tick update for seeker and timestamp without rebuilding queue."""
-        if not self._is_user_seeking and getattr(self, "page", None):
+        if not self._is_user_seeking:
             try:
                 pos = self.backend.position_seconds
                 self.slider_progress.value = min(pos, self.slider_progress.max)

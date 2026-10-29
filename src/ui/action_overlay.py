@@ -11,11 +11,8 @@ from typing import Callable
 import flet as ft
 from src.state import AppState
 from src.ui.theme import (
-    ACCENT_CYAN,
     ACCENT_RED,
-    BORDER_RADIUS_CARD,
     SURFACE_CARD,
-    SURFACE_DARK,
     SURFACE_ELEVATED,
     TEXT_MUTED,
     TEXT_PRIMARY,
@@ -40,7 +37,7 @@ class ActionOverlay(ft.Container):
         card_music = self._build_action_card(
             title="YouTube Music",
             subtitle="กลับไปที่หน้าจอเครื่องเล่นเพลง",
-            icon=ft.icons.MUSIC_NOTE_ROUNDED,
+            icon=ft.Icons.MUSIC_NOTE_ROUNDED,
             icon_color="#FFFFFF",
             icon_bg=ACCENT_RED,
             on_click=self._handle_music_click,
@@ -50,7 +47,7 @@ class ActionOverlay(ft.Container):
         card_folder = self._build_action_card(
             title="เปลี่ยนโฟลเดอร์รูป",
             subtitle="เลือกโฟลเดอร์รูปภาพในเครื่อง",
-            icon=ft.icons.FOLDER_OPEN_ROUNDED,
+            icon=ft.Icons.FOLDER_OPEN_ROUNDED,
             icon_color="#FFFFFF",
             icon_bg="#2563EB",
             on_click=self._handle_folder_click,
@@ -58,7 +55,7 @@ class ActionOverlay(ft.Container):
 
         # Close / Dismiss Button
         btn_close = ft.IconButton(
-            icon=ft.icons.CLOSE_ROUNDED,
+            icon=ft.Icons.CLOSE_ROUNDED,
             icon_color=TEXT_PRIMARY,
             icon_size=28,
             bgcolor="rgba(255, 255, 255, 0.12)",
@@ -102,7 +99,7 @@ class ActionOverlay(ft.Container):
             padding=24,
             border_radius=24,
             bgcolor=SURFACE_CARD,
-            border=ft.border.all(1.5, "rgba(255, 255, 255, 0.18)"),
+            border=ft.Border(top=ft.BorderSide(1.5, "rgba(255, 255, 255, 0.18)"), right=ft.BorderSide(1.5, "rgba(255, 255, 255, 0.18)"), bottom=ft.BorderSide(1.5, "rgba(255, 255, 255, 0.18)"), left=ft.BorderSide(1.5, "rgba(255, 255, 255, 0.18)")),
         )
 
         super().__init__(
@@ -113,7 +110,7 @@ class ActionOverlay(ft.Container):
                 expand=True,
             ),
             bgcolor="rgba(0, 0, 0, 0.85)",
-            alignment=ft.alignment.center,
+            alignment=ft.Alignment(0, 0),
             visible=False,
             expand=True,
         )
@@ -137,7 +134,7 @@ class ActionOverlay(ft.Container):
                         height=72,
                         border_radius=20,
                         bgcolor=icon_bg,
-                        alignment=ft.alignment.center,
+                        alignment=ft.Alignment(0, 0),
                     ),
                     ft.Column(
                         controls=[
@@ -157,10 +154,10 @@ class ActionOverlay(ft.Container):
             padding=16,
             border_radius=18,
             bgcolor=SURFACE_ELEVATED,
-            border=ft.border.all(1.2, "rgba(255, 255, 255, 0.12)"),
+            border=ft.Border(top=ft.BorderSide(1.2, "rgba(255, 255, 255, 0.12)"), right=ft.BorderSide(1.2, "rgba(255, 255, 255, 0.12)"), bottom=ft.BorderSide(1.2, "rgba(255, 255, 255, 0.12)"), left=ft.BorderSide(1.2, "rgba(255, 255, 255, 0.12)")),
             ink=True,
             on_click=on_click,
-            alignment=ft.alignment.center,
+            alignment=ft.Alignment(0, 0),
         )
 
     def _handle_music_click(self, e) -> None:
@@ -174,17 +171,17 @@ class ActionOverlay(ft.Container):
     def show(self) -> None:
         """Displays overlay."""
         self.visible = True
-        if getattr(self, "page", None):
-            try:
+        try:
+            if self.page:
                 self.update()
-            except Exception:
-                pass
+        except Exception:
+            pass
 
     def hide(self) -> None:
         """Hides overlay."""
         self.visible = False
-        if getattr(self, "page", None):
-            try:
+        try:
+            if self.page:
                 self.update()
-            except Exception:
-                pass
+        except Exception:
+            pass

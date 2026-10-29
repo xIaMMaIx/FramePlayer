@@ -10,8 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from src.music_backend import Track
-
-LOCAL_PLAYLIST_PATH = Path("local_playlist.json")
+from src.storage import LOCAL_PLAYLIST_PATH
 
 # Initial recommended tracks if newly initialized
 DEFAULT_INITIAL_TRACKS = [
@@ -45,9 +44,7 @@ class LocalPlaylistManager:
     def load(self) -> List[Track]:
         """Loads tracks from local_playlist.json or seeds defaults."""
         if not self.file_path.exists():
-            self._tracks = [Track.from_dict(t) for t in DEFAULT_INITIAL_TRACKS]
-            self.save()
-            return self._tracks
+            return self._seed_defaults()
 
         try:
             with open(self.file_path, "r", encoding="utf-8") as f:
@@ -55,12 +52,16 @@ class LocalPlaylistManager:
                 if isinstance(data, list) and len(data) > 0:
                     self._tracks = [Track.from_dict(t) for t in data]
                 else:
-                    self._tracks = [Track.from_dict(t) for t in DEFAULT_INITIAL_TRACKS]
-                    self.save()
+                    return self._seed_defaults()
         except Exception as e:
             print(f"[LocalPlaylistManager] Error loading {self.file_path}: {e}")
-            self._tracks = [Track.from_dict(t) for t in DEFAULT_INITIAL_TRACKS]
+            return self._seed_defaults()
 
+        return self._tracks
+
+    def _seed_defaults(self) -> List[Track]:
+        self._tracks = [Track.from_dict(t) for t in DEFAULT_INITIAL_TRACKS]
+        self.save()
         return self._tracks
 
     def save(self) -> bool:
@@ -103,6 +104,16 @@ class LocalPlaylistManager:
     def has_track(self, track_id: str) -> bool:
         """Checks if a track ID already exists in the playlist."""
         return any(t.id == track_id for t in self._tracks)
+
+    def reorder_track(self, old_index: int, new_index: int) -> bool:
+        """Reorders track from old_index to new_index and persists to disk."""
+        if 0 <= old_index < len(self._tracks) and 0 <= new_index < len(self._tracks):
+            track = self._tracks.pop(old_index)
+            self._tracks.insert(new_index, track)
+            self.save()
+            print(f"[LocalPlaylistManager] Reordered track '{track.title}' from {old_index} to {new_index}")
+            return True
+        return False
 
     def count(self) -> int:
         return len(self._tracks)

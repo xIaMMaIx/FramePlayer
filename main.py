@@ -10,23 +10,32 @@ import sys
 from pathlib import Path
 import flet as ft
 
+# FLET AST SCANNER WORKAROUND
+# The flet build AST scanner might only scan main.py. 
+# We include these so it registers the Flutter plugins for Android.
+if False:
+    from flet import FilePicker
+    import flet_audio as fta
+    import flet.controls.services.file_picker
+    from flet import Wakelock
+
+
 from src.config_manager import ConfigManager
 from src.photo_engine import PhotoEngine
 from src.services.audio_controller import AudioController, DEFAULT_AUDIO_PLACEHOLDER
 from src.services.local_playlist_manager import LocalPlaylistManager
-from src.services.oauth_manager import OAuthManager
 from src.services.ytmusic_service import YTMusicService
 from src.state import AppMode, AppState
 from src.ui.action_overlay import ActionOverlay
 from src.ui.library_drawer import LibraryDrawer
 from src.ui.music_view import MusicPlayerView
-from src.ui.oauth_modal import OAuthModal
 from src.ui.photo_view import PhotoFrameView
 from src.ui.settings_view import SettingsView
 from src.ui.theme import BG_DARK
 
 
 async def main(page: ft.Page):
+
     # Capture the main asyncio loop for thread-safe UI callback scheduling
     main_loop = asyncio.get_running_loop()
 
@@ -41,6 +50,9 @@ async def main(page: ft.Page):
     page.title = "CarPlay YouTube Music & Digital Photo Frame"
     page.theme_mode = ft.ThemeMode.DARK
     page.bgcolor = BG_DARK
+    
+    # Make Android status bar transparent and hide it
+    page.window.full_screen = True
     page.padding = 0
     page.spacing = 0
 
@@ -49,10 +61,25 @@ async def main(page: ft.Page):
         "Prompt-Medium": "https://github.com/google/fonts/raw/main/ofl/prompt/Prompt-Medium.ttf",
         "Prompt-Bold": "https://github.com/google/fonts/raw/main/ofl/prompt/Prompt-Bold.ttf",
     }
-    page.theme = ft.Theme(font_family="Prompt")
+    page.theme = ft.Theme(
+        font_family="Prompt",
+        system_overlay_style=ft.SystemOverlayStyle(
+            status_bar_color=ft.Colors.TRANSPARENT,
+            system_navigation_bar_color=ft.Colors.TRANSPARENT,
+            enforce_system_navigation_bar_contrast=False,
+            enforce_system_status_bar_contrast=False,
+        )
+    )
 
     # --- 2. Initialize Core Subsystems ---
     config_mgr = ConfigManager()
+    
+    # Pre-detect orientation on startup based on page dimensions
+    if page.height > page.width:
+        config_mgr.set("orientation", "portrait")
+    else:
+        config_mgr.set("orientation", "landscape")
+
     state = AppState()
     state.idle_threshold_seconds = config_mgr.get("idle_timeout_seconds", 60)
     state.volume = config_mgr.get("volume", 0.75)
@@ -63,7 +90,6 @@ async def main(page: ft.Page):
         blur_radius=config_mgr.get("background_blur_radius", 24),
     )
 
-    oauth_manager = OAuthManager(config_mgr=config_mgr)
     ytmusic_service = YTMusicService(config_mgr=config_mgr)
 
     # Window geometry for touch tablet (Orientation-aware)
@@ -80,7 +106,7 @@ async def main(page: ft.Page):
                 page.window.height = 720
                 page.window.min_width = 800
                 page.window.min_height = 480
-            page.window.center()
+            page.run_task(page.window.center)
 
             def handle_window_event(e):
                 if e.data in ("close", "destroy"):
@@ -93,12 +119,16 @@ async def main(page: ft.Page):
     local_playlist_mgr = LocalPlaylistManager()
 
     # --- 3. Audio Control Setup & Local Playlist Startup ---
-    audio_control = ft.Audio(
+    audio_control = None
+    
+    # ANDROID VERSION: Strict flet_audio usage
+    import flet_audio as fta
+    audio_control = fta.Audio(
         src=DEFAULT_AUDIO_PLACEHOLDER,
         autoplay=False,
         volume=state.volume,
     )
-    page.overlay.append(audio_control)
+    # page.overlay.append(audio_control) # Service!
 
     audio_controller = AudioController(
         state=state,
@@ -123,10 +153,10 @@ async def main(page: ft.Page):
 
         if new_mode == AppMode.PHOTO_FRAME:
             action_overlay.hide()
-            oauth_modal.close_modal()
             library_drawer.close_drawer()
             dashboard_container.visible = False
             photo_view_container.visible = True
+            photo_view.apply_settings()
             photo_view.update_now_playing()
         elif new_mode == AppMode.MUSIC_PLAYER:
             action_overlay.hide()
@@ -159,7 +189,7 @@ async def main(page: ft.Page):
         set_app_mode(AppMode.MUSIC_PLAYER)
 
     # --- 7. File Picker (Photo Folder) ---
-    def on_folder_result(e: ft.FilePickerResultEvent):
+    def on_folder_result(e):
         if e.path:
             folder_path = e.path
             config_mgr.set_photo_folder(folder_path)
@@ -174,20 +204,27 @@ async def main(page: ft.Page):
             )
             page.overlay.append(snack)
             snack.open = True
-            page.update()
-
-    file_picker = ft.FilePicker(on_result=on_folder_result)
-    page.overlay.append(file_picker)
+            page.update()    # FilePicker Service...
+    file_picker = ft.FilePicker()
 
     def trigger_pick_folder():
         state.reset_idle()
-        file_picker.get_directory_path(dialog_title="Select Photo Slideshow Folder")
+        async def pick_task():
+            try:
+                path = await file_picker.get_directory_path(dialog_title="Select Photo Slideshow Folder")
+                if path:
+                    class MockEvent:
+                        def __init__(self, p): self.path = p
+                    on_folder_result(MockEvent(path))
+            except Exception as ex:
+                print("FilePicker error:", ex)
+        page.run_task(pick_task)
 
     def wake_and_change_folder():
         dismiss_wake_overlay()
         trigger_pick_folder()
 
-    # --- 8. Local Playlist Synchronization & OAuth Callbacks ---
+    # --- 8. Local Playlist Synchronization ---
     def sync_local_playlist_to_queue():
         """Syncs modified local playlist to active player queue without stopping active track."""
         tracks = local_playlist_mgr.get_tracks()
@@ -202,49 +239,13 @@ async def main(page: ft.Page):
         audio_controller._current_index = curr_idx
         music_view.update_view()
 
-    def on_login_success():
-        ytmusic_service.initialize_client()
-        settings_view.update_folder_info()
-        music_view.update_view()
-        snack = ft.SnackBar(
-            content=ft.Text("YouTube Music connected successfully!"),
-            bgcolor="#059669",
-            duration=4000,
-        )
-        page.overlay.append(snack)
-        snack.open = True
-        page.update()
-
-    def handle_logout():
-        oauth_manager.logout()
-        ytmusic_service.initialize_client()
-        settings_view.update_folder_info()
-        music_view.update_view()
-        snack = ft.SnackBar(
-            content=ft.Text("Disconnected YouTube Music account."),
-            bgcolor="#334155",
-            duration=3000,
-        )
-        page.overlay.append(snack)
-        snack.open = True
-        page.update()
-
     # --- 9. Instantiate UI Views & Modals ---
-    oauth_modal = OAuthModal(
-        oauth_manager=oauth_manager,
-        on_login_success=on_login_success,
-        on_close=lambda: None,
-        async_runner=dispatch_async,
-    )
-
     library_drawer = LibraryDrawer(
         ytmusic_service=ytmusic_service,
         audio_controller=audio_controller,
         local_playlist_mgr=local_playlist_mgr,
-        oauth_manager=oauth_manager,
         on_playlist_modified=sync_local_playlist_to_queue,
         on_track_selected=lambda: music_view.update_view(),
-        on_open_login=lambda: oauth_modal.open_modal(),
         on_close=lambda: None,
         async_runner=dispatch_async,
     )
@@ -252,18 +253,41 @@ async def main(page: ft.Page):
     music_view = MusicPlayerView(
         state=state,
         backend=audio_controller,
-        oauth_manager=oauth_manager,
         config_mgr=config_mgr,
         on_interaction=handle_global_interaction,
         on_open_library=lambda: library_drawer.open_drawer(),
-        on_open_login=lambda: oauth_modal.open_modal(),
         on_open_photos=lambda: set_app_mode(AppMode.PHOTO_FRAME),
         on_open_settings=lambda: set_app_mode(AppMode.SETTINGS),
+        on_queue_reorder=lambda old, new: local_playlist_mgr.reorder_track(old, new),
     )
+
+    # Auto-detect orientation on resize for Android
+    def on_page_resize(e):
+        try:
+            try:
+                w, h = map(float, e.data.split(","))
+                is_port = h > w
+            except:
+                is_port = page.height > page.width
+                
+            new_ori = "portrait" if is_port else "landscape"
+            old_ori = config_mgr.get("orientation", "landscape")
+            
+            if new_ori != old_ori:
+                config_mgr.set("orientation", new_ori)
+                music_view.rebuild_layout()
+                music_view.update()
+                page.update()
+        except Exception as ex:
+            print("Resize error:", ex)
+            
+    page.on_resize = on_page_resize
+
 
     photo_view = PhotoFrameView(
         state=state,
         photo_engine=photo_engine,
+        config_mgr=config_mgr,
         on_tap_wake=lambda: set_app_mode(AppMode.MUSIC_PLAYER),
         backend=audio_controller,
     )
@@ -277,22 +301,19 @@ async def main(page: ft.Page):
                 else:
                     page.window.width = 1280
                     page.window.height = 720
-                page.window.center()
+                page.run_task(page.window.center)
         except Exception as e:
             print(f"[Main] Window resize note: {e}")
         music_view.rebuild_layout()
+        music_view.update()
         page.update()
 
     settings_view = SettingsView(
         state=state,
         config_mgr=config_mgr,
         photo_engine=photo_engine,
-        oauth_manager=oauth_manager,
-        ytmusic_service=ytmusic_service,
         on_pick_folder=trigger_pick_folder,
         on_test_screensaver=lambda: set_app_mode(AppMode.PHOTO_FRAME),
-        on_open_login=lambda: oauth_modal.open_modal(),
-        on_logout=handle_logout,
         on_back_to_player=lambda: set_app_mode(AppMode.MUSIC_PLAYER),
         on_orientation_changed=handle_orientation_change,
     )
@@ -329,7 +350,6 @@ async def main(page: ft.Page):
             photo_view_container,
             action_overlay,
             library_drawer,
-            oauth_modal,
         ],
         expand=True,
     )
@@ -394,6 +414,16 @@ async def main(page: ft.Page):
     page.run_task(slideshow_task)
     page.run_task(progress_tracker_task)
 
+    # Enable Wakelock for Digital Photo Frame
+    async def enable_wakelock():
+        try:
+            wakelock = ft.Wakelock()
+            await wakelock.enable()
+            print("Wakelock enabled.")
+        except Exception as e:
+            print("Wakelock error:", e)
+    page.run_task(enable_wakelock)
+
 
 if __name__ == "__main__":
-    ft.app(target=main)
+    ft.run(main)

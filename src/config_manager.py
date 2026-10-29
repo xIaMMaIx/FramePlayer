@@ -4,11 +4,12 @@ Handles reading, writing, and persistence of user preferences to config.json.
 """
 
 import json
-import os
 from pathlib import Path
 from typing import Any, Dict
 
-DEFAULT_CONFIG_PATH = Path("config.json")
+from src.storage import CONFIG_FILE_PATH
+
+DEFAULT_CONFIG_PATH = CONFIG_FILE_PATH
 DEFAULT_SAMPLE_FOLDER = Path("assets/samples").resolve()
 
 
@@ -26,8 +27,6 @@ class ConfigManager:
         "show_clock_on_photo_frame": True,
         "background_blur_radius": 24,
         "orientation": "landscape",  # "landscape" or "portrait"
-        "oauth_client_id": "",
-        "oauth_client_secret": "",
     }
 
     def __init__(self, config_path: Path = DEFAULT_CONFIG_PATH):

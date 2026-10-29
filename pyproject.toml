@@ -5,9 +5,10 @@ description = "CarPlay & Tablet YouTube Music Player with Digital Photo Frame"
 authors = [{ name = "FramePlayer" }]
 dependencies = [
     "flet>=0.25.0",
+    "flet-audio>=0.25.0",
+    "flet-video>=0.25.0",
     "ytmusicapi>=1.12.0",
-    "yt-dlp>=2024.0.0",
-    "qrcode>=7.4.0",
+    "yt-dlp>=2026.10.26",
     "requests>=2.28.0",
 ]
 
@@ -16,3 +17,36 @@ org = "com.frameplayer.app"
 product = "Frame Player"
 company = "FramePlayer"
 copyright = "Copyright (C) 2026"
+
+[tool.flet.app]
+# Keep local user data, credentials and dev files out of the APK.
+# serious_python matches exact relative paths with the OS separator, so nested
+# paths are listed with both "\" (Windows builds) and "/" (Linux/macOS builds).
+exclude = [
+    ".git",
+    ".gitignore",
+    "oauth.json",
+    "config.json",
+    "local_playlist.json",
+    "data",
+    "build_apk.bat",
+    "README.md",
+    "config.example.json",
+    "__pycache__",
+    "src\\__pycache__",
+    "src\\services\\__pycache__",
+    "src\\ui\\__pycache__",
+    "src\\FramePlayer.egg-info",
+    "src/__pycache__",
+    "src/services/__pycache__",
+    "src/ui/__pycache__",
+    "src/FramePlayer.egg-info",
+]
+
+[tool.flet.android.permission]
+"android.permission.READ_EXTERNAL_STORAGE" = true
+"android.permission.MANAGE_EXTERNAL_STORAGE" = true
+
+"android.permission.READ_MEDIA_IMAGES" = true
+"android.permission.READ_MEDIA_VIDEO" = true
+"android.permission.READ_MEDIA_AUDIO" = true
