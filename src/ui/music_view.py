@@ -2,15 +2,14 @@
 CarPlay / Android Auto-style Music Dashboard View.
 Features Split-View layout:
 - Left: Ambient Blurred Cover Art Backdrop, Large Album Art, Title, Artist, and Like button.
-- Right: Quick Action Header (Connect YouTube, Library, Photo Frame, Settings),
-         Jumbo Touch Controls, Seek Slider, Volume, and Upcoming Queue list.
+- Right: Menu (Library, Photo Frame, Settings), large touch controls, seek slider,
+         and the playlist (which is also the play queue).
 """
 
 from typing import Callable, Optional
 import flet as ft
 
-from src.config_manager import ConfigManager
-from src.music_backend import BaseMusicBackend
+from src.services.audio_controller import AudioController
 from src.state import AppState
 from src.ui.theme import (
     ACCENT_RED,
@@ -28,19 +27,17 @@ class MusicPlayerView(ft.Container):
     def __init__(
         self,
         state: AppState,
-        backend: BaseMusicBackend,
-        config_mgr: Optional[ConfigManager] = None,
+        backend: AudioController,
+        is_portrait: bool = False,
         on_interaction: Optional[Callable[[], None]] = None,
         on_open_library: Optional[Callable[[], None]] = None,
         on_open_photos: Optional[Callable[[], None]] = None,
         on_open_settings: Optional[Callable[[], None]] = None,
-        on_queue_reorder: Optional[Callable[[int, int], None]] = None,
     ):
         super().__init__(expand=True)
         self.state = state
-        self.on_queue_reorder = on_queue_reorder
         self.backend = backend
-        self.config_mgr = config_mgr
+        self.is_portrait = is_portrait
         self.on_interaction = on_interaction or (lambda: None)
         self.on_open_library = on_open_library
         self.on_open_photos = on_open_photos
@@ -86,14 +83,14 @@ class MusicPlayerView(ft.Container):
             icon_color=TEXT_SECONDARY,
             icon_size=28,
             on_click=self._handle_like_toggle,
-            tooltip="Add to Liked Songs",
+            tooltip="Save to My Playlist",
         )
 
         # --- Right Panel: Quick Actions Toolbar (PopupMenu) ---
         self.settings_menu = ft.PopupMenuButton(
             icon=ft.Icons.SETTINGS_ROUNDED,
             items=[
-                ft.PopupMenuItem(icon=ft.Icons.PLAYLIST_PLAY_ROUNDED, content="Library & Queue", on_click=lambda e: self.on_open_library() if self.on_open_library else None),
+                ft.PopupMenuItem(icon=ft.Icons.PLAYLIST_PLAY_ROUNDED, content="Search & Playlist", on_click=lambda e: self.on_open_library() if self.on_open_library else None),
                 ft.PopupMenuItem(icon=ft.Icons.PHOTO_LIBRARY_ROUNDED, content="Photo Frame", on_click=lambda e: self.on_open_photos() if self.on_open_photos else None),
                 ft.PopupMenuItem(icon=ft.Icons.SETTINGS_OUTLINED, content="Settings", on_click=lambda e: self.on_open_settings() if self.on_open_settings else None),
             ],
@@ -186,6 +183,7 @@ class MusicPlayerView(ft.Container):
             padding=16,
             expand=True,
         )
+        self.txt_queue_count = ft.Text("", size=12, color=TEXT_MUTED)
         self.rebuild_layout()
 
         if self.backend:
@@ -197,11 +195,19 @@ class MusicPlayerView(ft.Container):
     def _get_default_art(self) -> str:
         return DEFAULT_ART_URL
 
+    def set_portrait(self, is_portrait: bool) -> None:
+        """Re-lays out the view when the device rotates."""
+        if is_portrait != self.is_portrait:
+            self.is_portrait = is_portrait
+            self.rebuild_layout()
+            try:
+                self.update()
+            except Exception:
+                pass
+
     def rebuild_layout(self) -> None:
         """Dynamically rebuilds layout with 16:9 widescreen cover art and separated controls."""
-        is_portrait = False
-        if self.config_mgr:
-            is_portrait = self.config_mgr.get("orientation", "landscape") == "portrait"
+        is_portrait = self.is_portrait
 
         # 16:9 Widescreen Cover Card
         art_card = ft.Container(
@@ -291,13 +297,13 @@ class MusicPlayerView(ft.Container):
                 ft.Row(
                     [
                         ft.Icon(ft.Icons.QUEUE_MUSIC_ROUNDED, size=18, color=ACCENT_RED),
-                        ft.Text("Upcoming Queue", size=15, weight=ft.FontWeight.BOLD, color=TEXT_PRIMARY),
+                        ft.Text("My Playlist", size=15, weight=ft.FontWeight.BOLD, color=TEXT_PRIMARY),
                     ],
                     spacing=6,
                 ),
                 ft.Row(
                     [
-                        ft.Text(f"{len(self.backend.queue)} tracks", size=12, color=TEXT_MUTED),
+                        self.txt_queue_count,
                         self.settings_menu,
                     ],
                     spacing=12,
@@ -470,9 +476,7 @@ class MusicPlayerView(ft.Container):
         if old_idx is None or new_idx is None or old_idx == new_idx:
             return
 
-        self.backend.reorder_queue(old_idx, new_idx)
-        if hasattr(self, "on_queue_reorder") and self.on_queue_reorder:
-            self.on_queue_reorder(old_idx, new_idx)
+        self.backend.move_track(old_idx, new_idx)
         self.update_view()
 
     def _handle_track_select(self, track_id: str) -> None:
@@ -482,14 +486,12 @@ class MusicPlayerView(ft.Container):
             return
 
         self.backend.play_track_by_id(track_id)
-        self.state.is_playing = True
         self.state.reset_idle()
         self.update_view()
 
     def _handle_play_pause(self, e) -> None:
         self.on_interaction()
-        is_now_playing = self.backend.toggle_play()
-        self.state.is_playing = is_now_playing
+        self.backend.toggle_play()
         self.state.reset_idle()
         self.update_view()
 
@@ -530,11 +532,8 @@ class MusicPlayerView(ft.Container):
 
     def _handle_like_toggle(self, e) -> None:
         self.on_interaction()
-        is_liked = self.backend.toggle_like()
-        self.btn_like.icon = ft.Icons.FAVORITE_ROUNDED if is_liked else ft.Icons.FAVORITE_BORDER_ROUNDED
-        self.btn_like.icon_color = ACCENT_RED if is_liked else TEXT_SECONDARY
-        if getattr(self.btn_like, "page", None):
-            self.btn_like.update()
+        self.backend.toggle_saved()  # Heart = saved in My Playlist
+        self.update_view()
 
     def _handle_seek_start(self, e) -> None:
         self.on_interaction()
@@ -560,10 +559,9 @@ class MusicPlayerView(ft.Container):
             self.txt_album.value = track.album
             self.txt_total.value = track.formatted_duration
             self.slider_progress.max = max(1.0, track.duration_seconds)
-            self.btn_like.icon = (
-                ft.Icons.FAVORITE_ROUNDED if getattr(track, "is_liked", False) else ft.Icons.FAVORITE_BORDER_ROUNDED
-            )
-            self.btn_like.icon_color = ACCENT_RED if getattr(track, "is_liked", False) else TEXT_SECONDARY
+            saved = self.backend.is_current_saved
+            self.btn_like.icon = ft.Icons.FAVORITE_ROUNDED if saved else ft.Icons.FAVORITE_BORDER_ROUNDED
+            self.btn_like.icon_color = ACCENT_RED if saved else TEXT_SECONDARY
 
         # Play/Pause Icon
         icon_ctrl = self.btn_play_pause.content
@@ -592,6 +590,7 @@ class MusicPlayerView(ft.Container):
             secs = int(pos % 60)
             self.txt_elapsed.value = f"{mins:02d}:{secs:02d}"
 
+        self.txt_queue_count.value = f"{len(self.backend.queue)} tracks"
         self._render_queue_list()
         try:
             self.update()

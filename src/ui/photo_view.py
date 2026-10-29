@@ -10,7 +10,7 @@ Features dual-layer crossfading with:
 from typing import Callable, Optional
 import flet as ft
 import flet_video as ftv
-from src.music_backend import BaseMusicBackend
+from src.services.audio_controller import AudioController
 from src.photo_engine import PhotoEngine
 from src.state import AppState
 from src.ui.theme import (
@@ -30,7 +30,7 @@ class PhotoFrameView(ft.Container):
         state: AppState,
         photo_engine: PhotoEngine,
         on_tap_wake: Callable[[], None],
-        backend: Optional[BaseMusicBackend] = None,
+        backend: Optional[AudioController] = None,
         config_mgr = None,
     ):
         self.state = state
@@ -308,7 +308,7 @@ class PhotoFrameView(ft.Container):
     def _get_fit_mode(self):
         if not hasattr(self, "config_mgr") or not self.config_mgr:
             return ft.BoxFit.CONTAIN
-        return ft.BoxFit.COVER if self.config_mgr.get("photo_fill_mode", "contain") == "cover" else ft.BoxFit.CONTAIN
+        return ft.BoxFit.COVER if self.config_mgr.get("photo_fill_mode") == "cover" else ft.BoxFit.CONTAIN
 
     def apply_settings(self) -> None:
         """Applies configuration changes immediately."""

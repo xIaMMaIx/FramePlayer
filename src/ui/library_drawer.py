@@ -1,9 +1,6 @@
 """
-Unified Local Playlist Manager & YouTube Search Drawer.
-Single-screen interface:
-- Search YouTube Music directly at the top to add songs
-- Manage & play saved local tracks below
-- No tabs, completely streamlined
+Library drawer: search YouTube Music at the top, the saved playlist below.
+The playlist is also the play queue, so playing a search result adds it to the playlist.
 """
 
 import asyncio
@@ -12,7 +9,6 @@ import flet as ft
 
 from src.music_backend import Track
 from src.services.audio_controller import AudioController
-from src.services.local_playlist_manager import LocalPlaylistManager
 from src.services.ytmusic_service import YTMusicService
 from src.ui.theme import (
     ACCENT_CYAN,
@@ -29,17 +25,13 @@ class LibraryDrawer(ft.Container):
         self,
         ytmusic_service: YTMusicService,
         audio_controller: AudioController,
-        local_playlist_mgr: LocalPlaylistManager,
         on_playlist_modified: Optional[Callable[[], None]] = None,
-        on_track_selected: Optional[Callable[[], None]] = None,
         on_close: Optional[Callable[[], None]] = None,
         async_runner: Optional[Callable] = None,
     ):
         self.ytmusic_service = ytmusic_service
         self.audio_controller = audio_controller
-        self.local_playlist_mgr = local_playlist_mgr
         self.on_playlist_modified = on_playlist_modified or (lambda: None)
-        self.on_track_selected = on_track_selected or (lambda: None)
         self.on_close_callback = on_close
         self.async_runner = async_runner
 
@@ -220,9 +212,9 @@ class LibraryDrawer(ft.Container):
     # ─── Local Playlist View ──────────────────────────────────────────
 
     def _render_local_playlist(self) -> None:
-        """Renders the local saved playlist with Play All header and Reorderable list."""
+        """Renders the saved playlist with a Play All header and a reorderable list."""
         self.content_list.controls.clear()
-        tracks = self.local_playlist_mgr.get_tracks()
+        tracks = self.audio_controller.queue
 
         # Header Info Row
         header = ft.Row(
@@ -242,7 +234,7 @@ class LibraryDrawer(ft.Container):
                         shape=ft.RoundedRectangleBorder(radius=8),
                         padding=ft.Padding.symmetric(horizontal=10, vertical=6),
                     ),
-                    on_click=lambda e: self._play_all_local_tracks(),
+                    on_click=lambda e: self._play(tracks[0]) if tracks else None,
                     disabled=(len(tracks) == 0),
                 ),
             ],
@@ -275,8 +267,7 @@ class LibraryDrawer(ft.Container):
                 on_reorder=self._handle_playlist_reorder,
             )
             for idx, track in enumerate(tracks):
-                tile = self._build_local_track_tile(track, tracks, idx)
-                reorder_list.controls.append(tile)
+                reorder_list.controls.append(self._build_local_track_tile(track, idx))
             self.content_list.controls.append(reorder_list)
 
         try:
@@ -284,7 +275,7 @@ class LibraryDrawer(ft.Container):
         except Exception:
             pass
 
-    def _build_local_track_tile(self, track: Track, tracks: List[Track], index: int) -> ft.Container:
+    def _build_local_track_tile(self, track: Track, index: int) -> ft.Container:
         """Constructs list tile for local playlist with Drag Handle, Play and Delete actions."""
         return ft.Container(
             key=f"pl_track_{track.id}_{index}",
@@ -320,7 +311,7 @@ class LibraryDrawer(ft.Container):
                         icon=ft.Icons.PLAY_CIRCLE_FILLED_ROUNDED,
                         icon_color=ACCENT_RED,
                         icon_size=24,
-                        on_click=lambda e, q=tracks, i=index: self._play_tracks_queue(q, i),
+                        on_click=lambda e, t=track: self._play(t),
                         tooltip="Play this track",
                     ),
                     # Delete Button
@@ -341,7 +332,7 @@ class LibraryDrawer(ft.Container):
             bgcolor="rgba(255, 255, 255, 0.03)",
             border=ft.Border.all(1, "rgba(255, 255, 255, 0.06)"),
             ink=True,
-            on_click=lambda e, q=tracks, i=index: self._play_tracks_queue(q, i),
+            on_click=lambda e, t=track: self._play(t),
         )
 
     def _handle_playlist_reorder(self, e: ft.OnReorderEvent) -> None:
@@ -350,24 +341,18 @@ class LibraryDrawer(ft.Container):
         if old_idx is None or new_idx is None or old_idx == new_idx:
             return
 
-        self.local_playlist_mgr.reorder_track(old_idx, new_idx)
-        if self.on_playlist_modified:
-            self.on_playlist_modified()
+        self.audio_controller.move_track(old_idx, new_idx)
+        self.on_playlist_modified()
         self._render_local_playlist()
 
     def _handle_delete_track(self, track_id: str) -> None:
-        """Deletes track from local storage and refreshes drawer + home screen."""
-        self.local_playlist_mgr.remove_track(track_id)
+        """Removes a song from the playlist (it keeps playing if it is the current one)."""
+        self.audio_controller.remove_track(track_id)
         self.on_playlist_modified()
         if self._is_searching:
             self._render_search_results()
         else:
             self._render_local_playlist()
-
-    def _play_all_local_tracks(self) -> None:
-        tracks = self.local_playlist_mgr.get_tracks()
-        if tracks:
-            self._play_tracks_queue(tracks, 0)
 
     # ─── YouTube Search & Add Songs ───────────────────────────────────
 
@@ -451,25 +436,24 @@ class LibraryDrawer(ft.Container):
                 )
             )
         else:
-            for idx, track in enumerate(self._search_results):
-                tile = self._build_search_result_tile(track, self._search_results, idx)
-                self.content_list.controls.append(tile)
+            for track in self._search_results:
+                self.content_list.controls.append(self._build_search_result_tile(track))
 
         try:
             self.update()
         except Exception:
             pass
 
-    def _build_search_result_tile(self, track: Track, results: List[Track], index: int) -> ft.Container:
-        """Constructs search result tile with Play and Add to Playlist buttons."""
-        is_already_added = self.local_playlist_mgr.has_track(track.id)
+    def _build_search_result_tile(self, track: Track) -> ft.Container:
+        """Search result tile: play (adds to the playlist) and add/remove toggle."""
+        is_saved = self.audio_controller.playlist.contains(track.id)
 
         btn_add = ft.IconButton(
-            icon=ft.Icons.CHECK_CIRCLE_ROUNDED if is_already_added else ft.Icons.ADD_CIRCLE_OUTLINE_ROUNDED,
-            icon_color=ACCENT_GREEN if is_already_added else ACCENT_CYAN,
+            icon=ft.Icons.CHECK_CIRCLE_ROUNDED if is_saved else ft.Icons.ADD_CIRCLE_OUTLINE_ROUNDED,
+            icon_color=ACCENT_GREEN if is_saved else ACCENT_CYAN,
             icon_size=24,
-            on_click=lambda e, t=track: self._handle_add_track_to_playlist(t),
-            tooltip="In Playlist" if is_already_added else "Add to My Playlist",
+            on_click=lambda e, t=track: self._toggle_saved(t),
+            tooltip="Remove from My Playlist" if is_saved else "Add to My Playlist",
         )
 
         return ft.Container(
@@ -497,8 +481,8 @@ class LibraryDrawer(ft.Container):
                         icon=ft.Icons.PLAY_CIRCLE_FILLED_ROUNDED,
                         icon_color=ACCENT_RED,
                         icon_size=24,
-                        on_click=lambda e, q=results, i=index: self._play_tracks_queue(q, i),
-                        tooltip="Play Preview",
+                        on_click=lambda e, t=track: self._play(t),
+                        tooltip="Play (adds to My Playlist)",
                     ),
                     # Add to Local Playlist Button
                     btn_add,
@@ -513,21 +497,16 @@ class LibraryDrawer(ft.Container):
             border=ft.Border.all(1, "rgba(255, 255, 255, 0.06)"),
         )
 
-    def _handle_add_track_to_playlist(self, track: Track) -> None:
-        """Adds track to local playlist, saves, and updates UI."""
-        self.local_playlist_mgr.add_track(track)
+    def _toggle_saved(self, track: Track) -> None:
+        playlist = self.audio_controller.playlist
+        if playlist.contains(track.id):
+            self.audio_controller.remove_track(track.id)
+        else:
+            playlist.add(track)
         self.on_playlist_modified()
         self._render_search_results()
 
-    def _play_tracks_queue(self, tracks: List[Track], start_index: int) -> None:
-        if 0 <= start_index < len(tracks):
-            target_track = tracks[start_index]
-            curr = self.audio_controller.current_track
-            if curr and curr.id == target_track.id and self.audio_controller.is_playing:
-                self.close_drawer()
-                return
-
-        self.audio_controller.load_queue(tracks, start_index, auto_play=True)
+    def _play(self, track: Track) -> None:
+        self.audio_controller.play_track(track)
         self.close_drawer()
-        self.on_track_selected()
-
+        self.on_playlist_modified()

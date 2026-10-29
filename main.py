@@ -71,51 +71,30 @@ async def main(page: ft.Page):
 
     # --- 2. Initialize Core Subsystems ---
     config_mgr = ConfigManager()
-    
-    # Pre-detect orientation on startup based on page dimensions
-    if page.height > page.width:
-        config_mgr.set("orientation", "portrait")
-    else:
-        config_mgr.set("orientation", "landscape")
-
-    state = AppState()
-    state.idle_threshold_seconds = config_mgr.get("idle_timeout_seconds", 60)
-    state.volume = config_mgr.get("volume", 0.75)
+    state = AppState(idle_threshold_seconds=config_mgr.get("idle_timeout_seconds"))
 
     photo_engine = PhotoEngine(
         initial_folder=config_mgr.get("photo_folder"),
-        shuffle=config_mgr.get("slideshow_shuffle", True),
-        blur_radius=config_mgr.get("background_blur_radius", 24),
+        shuffle=config_mgr.get("slideshow_shuffle"),
     )
 
-    ytmusic_service = YTMusicService(config_mgr=config_mgr)
+    ytmusic_service = YTMusicService()
+    playlist = LocalPlaylistManager()
 
-    local_playlist_mgr = LocalPlaylistManager()
-
-    # --- 3. Audio Control Setup & Local Playlist Startup ---
-    audio_control = None
-    
-    # ANDROID VERSION: Strict flet_audio usage
+    # --- 3. Audio Control Setup ---
+    # flet_audio.Audio is a service control; it registers itself with the page.
     import flet_audio as fta
-    audio_control = fta.Audio(
-        src=DEFAULT_AUDIO_PLACEHOLDER,
-        autoplay=False,
-        volume=state.volume,
-    )
-    # page.overlay.append(audio_control) # Service!
+    audio_control = fta.Audio(src=DEFAULT_AUDIO_PLACEHOLDER, autoplay=False, volume=1.0)
 
+    # The saved playlist is the play queue (see AudioController)
     audio_controller = AudioController(
         state=state,
         ytmusic_service=ytmusic_service,
+        playlist=playlist,
         audio_control=audio_control,
         async_runner=dispatch_async,
     )
-
-    # Preload Local Playlist directly onto Home Screen with 0 delay
-    initial_tracks = local_playlist_mgr.get_tracks()
-    if initial_tracks:
-        print(f"[Main] Loaded {len(initial_tracks)} tracks from Local Playlist to home dashboard.")
-        audio_controller.load_queue(initial_tracks, 0, auto_play=False)
+    print(f"[Main] Loaded {len(playlist.tracks)} tracks from the playlist.")
 
     # --- 4. User Interaction Reset Handler ---
     def handle_global_interaction(e=None):
@@ -198,28 +177,11 @@ async def main(page: ft.Page):
         dismiss_wake_overlay()
         trigger_pick_folder()
 
-    # --- 8. Local Playlist Synchronization ---
-    def sync_local_playlist_to_queue():
-        """Syncs modified local playlist to active player queue without stopping active track."""
-        tracks = local_playlist_mgr.get_tracks()
-        curr_track = audio_controller.current_track
-        curr_idx = 0
-        if curr_track and curr_track in tracks:
-            curr_idx = tracks.index(curr_track)
-
-        # Update underlying queue preserving playing track
-        audio_controller._original_queue = list(tracks)
-        audio_controller._queue = list(tracks)
-        audio_controller._current_index = curr_idx
-        music_view.update_view()
-
     # --- 9. Instantiate UI Views & Modals ---
     library_drawer = LibraryDrawer(
         ytmusic_service=ytmusic_service,
         audio_controller=audio_controller,
-        local_playlist_mgr=local_playlist_mgr,
-        on_playlist_modified=sync_local_playlist_to_queue,
-        on_track_selected=lambda: music_view.update_view(),
+        on_playlist_modified=lambda: music_view.update_view(),
         on_close=lambda: None,
         async_runner=dispatch_async,
     )
@@ -227,34 +189,18 @@ async def main(page: ft.Page):
     music_view = MusicPlayerView(
         state=state,
         backend=audio_controller,
-        config_mgr=config_mgr,
+        is_portrait=page.height > page.width,
         on_interaction=handle_global_interaction,
         on_open_library=lambda: library_drawer.open_drawer(),
         on_open_photos=lambda: set_app_mode(AppMode.PHOTO_FRAME),
         on_open_settings=lambda: set_app_mode(AppMode.SETTINGS),
-        on_queue_reorder=lambda old, new: local_playlist_mgr.reorder_track(old, new),
     )
 
-    # Auto-detect orientation on resize for Android
+    # Layout follows the device rotation; nothing is stored in config
     def on_page_resize(e):
-        try:
-            try:
-                w, h = map(float, e.data.split(","))
-                is_port = h > w
-            except:
-                is_port = page.height > page.width
-                
-            new_ori = "portrait" if is_port else "landscape"
-            old_ori = config_mgr.get("orientation", "landscape")
-            
-            if new_ori != old_ori:
-                config_mgr.set("orientation", new_ori)
-                music_view.rebuild_layout()
-                music_view.update()
-                page.update()
-        except Exception as ex:
-            print("Resize error:", ex)
-            
+        if page.width and page.height:
+            music_view.set_portrait(page.height > page.width)
+
     page.on_resize = on_page_resize
 
 
@@ -266,11 +212,6 @@ async def main(page: ft.Page):
         backend=audio_controller,
     )
 
-    def handle_orientation_change(new_orientation: str):
-        music_view.rebuild_layout()
-        music_view.update()
-        page.update()
-
     settings_view = SettingsView(
         state=state,
         config_mgr=config_mgr,
@@ -278,7 +219,6 @@ async def main(page: ft.Page):
         on_pick_folder=trigger_pick_folder,
         on_test_screensaver=lambda: set_app_mode(AppMode.PHOTO_FRAME),
         on_back_to_player=lambda: set_app_mode(AppMode.MUSIC_PLAYER),
-        on_orientation_changed=handle_orientation_change,
     )
 
     action_overlay = ActionOverlay(
@@ -341,7 +281,7 @@ async def main(page: ft.Page):
                     # Keyboard input in the library search doesn't reach the root
                     # GestureDetector, so an open drawer or a loading stream counts as activity.
                     busy = audio_controller.is_playing or audio_controller.is_loading or library_drawer.visible
-                    if not busy:
+                    if not busy and state.idle_threshold_seconds > 0:  # 0 = screensaver off
                         state.idle_seconds += 1
 
                         if state.idle_seconds >= state.idle_threshold_seconds:
@@ -357,7 +297,7 @@ async def main(page: ft.Page):
         """Advances photos at configured interval with crossfade."""
         while True:
             try:
-                interval = config_mgr.get("slideshow_interval_seconds", 8)
+                interval = config_mgr.get("slideshow_interval_seconds")
                 await asyncio.sleep(interval)
                 if state.mode == AppMode.PHOTO_FRAME and not state.is_overlay_open:
                     photo_view.advance_photo()

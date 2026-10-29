@@ -165,10 +165,6 @@ class PhotoEngine:
         self.shuffle_enabled = enabled
         self._reset_playlist()
 
-    def set_blur_radius(self, radius: int) -> None:
-        """Updates the background Gaussian blur radius."""
-        self.blur_radius = max(1, min(60, radius))
-
     def get_current_photo(self) -> Optional[str]:
         """Returns the current photo path."""
         if not self._playlist:

@@ -1,18 +1,21 @@
 """
-Audio Playback & State Controller (AudioController).
-Plays streams through the native Flet Audio control (Android), with volume control,
-track queue management, and UI state synchronization.
+Audio Playback Controller (AudioController).
+Plays streams through the native Flet Audio control (Android). The saved playlist
+is the play queue; the current song is tracked by object, so editing the playlist
+(add, remove, reorder) never interrupts what is playing.
 """
 
 import asyncio
 import random
 from typing import Any, Callable, List, Optional
 
-from src.music_backend import BaseMusicBackend, MOCK_TRACKS, Track
+from src.music_backend import Track
+from src.services.local_playlist_manager import LocalPlaylistManager
 from src.services.ytmusic_service import YTMusicService
 from src.state import AppState
 
 DEFAULT_AUDIO_PLACEHOLDER = "https://raw.githubusercontent.com/mdn/webaudio-examples/main/audio-analyser/viper.mp3"
+REPEAT_MODES = ("off", "all", "one")
 
 
 def _parse_duration_to_seconds(val) -> float:
@@ -34,42 +37,44 @@ def _parse_duration_to_seconds(val) -> float:
         return 0.0
 
 
-class AudioController(BaseMusicBackend):
+class AudioController:
     def __init__(
         self,
         state: AppState,
         ytmusic_service: YTMusicService,
+        playlist: LocalPlaylistManager,
         audio_control: Optional[Any] = None,
         async_runner: Optional[Callable] = None,
     ):
         self.state = state
         self.ytmusic_service = ytmusic_service
+        self.playlist = playlist
         self.audio = audio_control
         self.async_runner = async_runner
 
-        # Playback & Queue State
-        self._queue: List[Track] = list(MOCK_TRACKS)
-        self._current_index: int = 0
-        self._is_playing: bool = False
-        self._position_seconds: float = 0.0
-        self._duration_seconds: float = 0.0
-        self._volume: float = state.volume
-        self._shuffle: bool = False
-        self._repeat: str = "off"  # "off", "all", "one"
-        self._is_loading_stream: bool = False
-        self._original_queue: List[Track] = list(self._queue)
+        self._current: Optional[Track] = playlist.tracks[0] if playlist.tracks else None
+        self._last_index: int = 0  # Where to continue if the current song was removed
+        self._shuffle_ids: List[str] = []
+        self._is_playing = False
+        self._is_loading_stream = False
+        self._position_seconds = 0.0
+        self._duration_seconds = 0.0
+        self._shuffle = False
+        self._repeat = "off"
         self._loaded_track_id: Optional[str] = None
-        self._current_stream_url: Optional[str] = None
 
-        # Callbacks
         self.on_track_changed: Optional[Callable[[Track], None]] = None
         self.on_state_changed: Optional[Callable[[], None]] = None
 
-        # Bind Flet Audio callbacks if provided
-        self._setup_flet_audio()
+        if self.audio:
+            self.audio.on_state_change = self._on_flet_audio_state_change
+            self.audio.on_position_change = self._on_flet_audio_position_change
+            self.audio.on_duration_change = self._on_flet_audio_duration_change
+
+    # --- Flet Audio events ---
 
     async def _safe_audio_call(self, coro, timeout: float = 12.0):
-        """Safely awaits Flet Audio RPC calls with timeout to prevent hanging."""
+        """Awaits a Flet Audio RPC call with a timeout so it can't hang the UI."""
         try:
             return await asyncio.wait_for(coro, timeout=timeout)
         except asyncio.TimeoutError:
@@ -77,44 +82,35 @@ class AudioController(BaseMusicBackend):
         except Exception as e:
             print(f"[AudioController] Flet audio operation note: {e}")
 
-    def _setup_flet_audio(self) -> None:
-        if self.audio:
-            try:
-                self.audio.on_state_change = self._on_flet_audio_state_change
-                self.audio.on_position_change = self._on_flet_audio_position_change
-                self.audio.on_duration_change = self._on_flet_audio_duration_change
-            except Exception as e:
-                print(f"[AudioController] Flet audio setup note: {e}")
-
     def _on_flet_audio_state_change(self, e) -> None:
-        state_str = str(getattr(e, "state", "")).lower()
-        if "completed" in state_str:
+        if "completed" in str(getattr(e, "state", "")).lower():
             self._handle_track_completed()
 
     def _on_flet_audio_position_change(self, e) -> None:
         try:
-            # flet_audio AudioPositionChangeEvent has .position (int) in milliseconds
-            val = getattr(e, "position", getattr(e, "data", 0))
-            secs = float(val) / 1000.0
-        except:
-            secs = 0.0
-        if secs >= 0:
-            self._position_seconds = secs
-            self.state.position_seconds = self._position_seconds
+            # AudioPositionChangeEvent.position is in milliseconds
+            self._position_seconds = max(0.0, float(getattr(e, "position", 0)) / 1000.0)
+        except (TypeError, ValueError):
+            pass
 
     def _on_flet_audio_duration_change(self, e) -> None:
-        dur_val = getattr(e, "duration", None)
-        secs = _parse_duration_to_seconds(dur_val)
+        secs = _parse_duration_to_seconds(getattr(e, "duration", None))
         if secs > 0:
             self._duration_seconds = secs
 
-    # --- Transport Controls ---
+    # --- Read-only state ---
 
     @property
     def current_track(self) -> Optional[Track]:
-        if 0 <= self._current_index < len(self._queue):
-            return self._queue[self._current_index]
-        return None
+        return self._current
+
+    @property
+    def queue(self) -> List[Track]:
+        return self.playlist.tracks
+
+    @property
+    def is_current_saved(self) -> bool:
+        return bool(self._current) and self.playlist.contains(self._current.id)
 
     @property
     def is_playing(self) -> bool:
@@ -125,21 +121,14 @@ class AudioController(BaseMusicBackend):
         return self._is_loading_stream
 
     @property
-    def queue(self) -> List[Track]:
-        return self._queue
-
-    @property
     def position_seconds(self) -> float:
         return self._position_seconds
 
     @property
     def duration_seconds(self) -> float:
-        curr = self.current_track
-        return curr.duration_seconds if curr and curr.duration_seconds > 0 else (self._duration_seconds or 180.0)
-
-    @property
-    def volume(self) -> float:
-        return self._volume
+        if self._current and self._current.duration_seconds > 0:
+            return self._current.duration_seconds
+        return self._duration_seconds or 180.0
 
     @property
     def shuffle(self) -> bool:
@@ -149,254 +138,184 @@ class AudioController(BaseMusicBackend):
     def repeat(self) -> str:
         return self._repeat
 
+    # --- Queue order ---
+
+    def _play_order(self) -> List[Track]:
+        """Playlist order, or the shuffled order (new songs appended, removed ones dropped)."""
+        tracks = self.playlist.tracks
+        if not self._shuffle:
+            return tracks
+        by_id = {t.id: t for t in tracks}
+        missing = [t.id for t in tracks if t.id not in self._shuffle_ids]
+        random.shuffle(missing)
+        self._shuffle_ids = [i for i in self._shuffle_ids if i in by_id] + missing
+        return [by_id[i] for i in self._shuffle_ids]
+
+    def _step(self, delta: int) -> Optional[Track]:
+        order = self._play_order()
+        if not order:
+            return None
+        ids = [t.id for t in order]
+        if self._current and self._current.id in ids:
+            index = (ids.index(self._current.id) + delta) % len(order)
+        else:
+            # Current song was removed: the song that slid into its slot plays next
+            index = (self._last_index if delta > 0 else self._last_index - 1) % len(order)
+        return order[index]
+
+    # --- Transport ---
+
     def _run_async(self, coro):
-        """Safely dispatches coroutine using thread-safe runner or main event loop."""
         if self.async_runner:
             return self.async_runner(coro)
-        try:
-            loop = asyncio.get_running_loop()
-            return loop.create_task(coro)
-        except RuntimeError:
-            try:
-                loop = asyncio.get_event_loop()
-                return loop.create_task(coro)
-            except Exception as e:
-                print(f"[AudioController] Async dispatch note: {e}")
+        return asyncio.get_running_loop().create_task(coro)
+
+    def play_track(self, track: Track) -> None:
+        """Plays a track, adding it to the playlist first if it is not saved yet."""
+        self.playlist.add(track)
+        if self._current and self._current.id == track.id and self._is_playing:
+            return
+        self._start(track)
+
+    def play_track_by_id(self, track_id: str) -> None:
+        for track in self.playlist.tracks:
+            if track.id == track_id:
+                self.play_track(track)
+                return
+
+    def _start(self, track: Track) -> None:
+        self._current = track
+        self._position_seconds = 0.0
+        ids = [t.id for t in self.playlist.tracks]
+        if track.id in ids:
+            self._last_index = ids.index(track.id)
+        self._run_async(self._load_and_play_track(track))
 
     def play(self) -> None:
-        """Resumes or starts playback of current track."""
-        curr = self.current_track
-        if not curr:
-            return
-
-        self._is_playing = True
-        self.state.is_playing = True
+        if not self._current:
+            if not self.playlist.tracks:
+                return
+            self._current = self.playlist.tracks[0]
         self.state.reset_idle()
-
-        if self._loaded_track_id == curr.id and self._current_stream_url and self.audio:
+        if self._loaded_track_id == self._current.id and self.audio:
+            self._is_playing = True
             self._run_async(self._safe_audio_call(self.audio.resume()))
             self._notify_state()
         else:
-            self._run_async(self._load_and_play_track(curr))
+            self._start(self._current)
 
     def pause(self) -> None:
-        """Pauses audio playback."""
         self._is_playing = False
-        self.state.is_playing = False
         if self.audio:
             self._run_async(self._safe_audio_call(self.audio.pause()))
         self._notify_state()
 
     def toggle_play(self) -> bool:
-        """Toggles between play and pause."""
-        if self._is_playing:
-            self.pause()
-        else:
-            self.play()
+        self.pause() if self._is_playing else self.play()
         return self._is_playing
 
-    def next_track(self) -> Optional[Track]:
-        """Advances to next track in queue."""
-        if not self._queue:
-            return None
+    def next_track(self) -> None:
+        track = self._current if self._repeat == "one" else self._step(+1)
+        if track:
+            self._start(track)
 
-        if self._repeat == "one":
-            self._position_seconds = 0.0
-        else:
-            self._current_index = (self._current_index + 1) % len(self._queue)
-            self._position_seconds = 0.0
-
-        curr = self.current_track
-        if curr:
-            self._run_async(self._load_and_play_track(curr))
-        return curr
-
-    def prev_track(self) -> Optional[Track]:
-        """Steps back to previous track in queue."""
-        if not self._queue:
-            return None
-
+    def prev_track(self) -> None:
         if self._position_seconds > 3.0:
             self.seek(0)
-            return self.current_track
-
-        self._current_index = (self._current_index - 1) % len(self._queue)
-        self._position_seconds = 0.0
-
-        curr = self.current_track
-        if curr:
-            self._run_async(self._load_and_play_track(curr))
-        return curr
-
-    def play_track_by_id(self, track_id: str) -> Optional[Track]:
-        """Finds track by ID in queue and plays it."""
-        curr = self.current_track
-        if curr and curr.id == track_id and self._is_playing:
-            return curr
-
-        for idx, track in enumerate(self._queue):
-            if track.id == track_id:
-                self._current_index = idx
-                self._position_seconds = 0.0
-                self._run_async(self._load_and_play_track(track))
-                return track
-        return None
+            return
+        track = self._step(-1)
+        if track:
+            self._start(track)
 
     def seek(self, position_seconds: float) -> None:
-        """Seeks to specific position in seconds."""
-        max_dur = self.duration_seconds
-        self._position_seconds = max(0.0, min(position_seconds, max_dur))
-        self.state.position_seconds = self._position_seconds
-
+        self._position_seconds = max(0.0, min(position_seconds, self.duration_seconds))
         if self.audio:
             self._run_async(self._safe_audio_call(self.audio.seek(int(self._position_seconds * 1000))))
-
-        self._notify_state()
-
-    def set_volume(self, volume: float) -> None:
-        """Sets playback volume (0.0 to 1.0)."""
-        self._volume = max(0.0, min(1.0, volume))
-        self.state.volume = self._volume
-
-        if self.audio:
-            self.audio.volume = self._volume
-            try:
-                self.audio.update()
-            except Exception:
-                pass
-
         self._notify_state()
 
     def toggle_shuffle(self) -> bool:
-        """Toggles shuffle mode and reorders queue."""
         self._shuffle = not self._shuffle
-        current = self.current_track
-
-        if self._shuffle:
-            shuffled = list(self._original_queue)
-            random.shuffle(shuffled)
-            if current and current in shuffled:
-                shuffled.remove(current)
-                shuffled.insert(0, current)
-            self._queue = shuffled
-            self._current_index = 0
-        else:
-            self._queue = list(self._original_queue)
-            if current and current in self._queue:
-                self._current_index = self._queue.index(current)
-            else:
-                self._current_index = 0
-
+        self._shuffle_ids = [self._current.id] if self._shuffle and self._current else []
         self._notify_state()
         return self._shuffle
 
     def cycle_repeat(self) -> str:
-        """Cycles repeat mode: off -> all -> one -> off."""
-        modes = ["off", "all", "one"]
-        current_idx = modes.index(self._repeat)
-        self._repeat = modes[(current_idx + 1) % len(modes)]
+        self._repeat = REPEAT_MODES[(REPEAT_MODES.index(self._repeat) + 1) % len(REPEAT_MODES)]
         self._notify_state()
         return self._repeat
 
-    def toggle_like(self) -> bool:
-        """Toggles like status for current track."""
-        curr = self.current_track
-        if curr:
-            curr.is_liked = not curr.is_liked
-            self._notify_state()
-            return curr.is_liked
-        return False
+    def toggle_saved(self) -> bool:
+        """Heart button: saves the current song to the playlist, or removes it."""
+        if not self._current:
+            return False
+        if self.playlist.contains(self._current.id):
+            self.playlist.remove(self._current.id)
+        else:
+            self.playlist.add(self._current)
+        self._notify_state()
+        return self.is_current_saved
 
-    def load_queue(self, tracks: List[Track], start_index: int = 0, auto_play: bool = True) -> None:
-        """Replaces active queue with a new list of tracks and begins playback if auto_play=True."""
-        if not tracks:
-            return
+    def remove_track(self, track_id: str) -> None:
+        """Removes a song from the playlist; the current song keeps playing."""
+        ids = [t.id for t in self.playlist.tracks]
+        if track_id in ids and self._current and self._current.id == track_id:
+            self._last_index = ids.index(track_id)
+        self.playlist.remove(track_id)
+        self._notify_state()
 
-        self._original_queue = list(tracks)
-        self._queue = list(tracks)
-        self._current_index = max(0, min(start_index, len(self._queue) - 1))
-        self._position_seconds = 0.0
-
-        curr = self.current_track
-        if curr:
-            if auto_play:
-                self._run_async(self._load_and_play_track(curr))
-            else:
-                self._notify_track()
-
-    def reorder_queue(self, old_index: int, new_index: int) -> None:
-        """Reorders queue items while preserving reference to the current playing track."""
-        if not (0 <= old_index < len(self._queue) and 0 <= new_index < len(self._queue)):
-            return
-
-        current_t = self.current_track
-        track = self._queue.pop(old_index)
-        self._queue.insert(new_index, track)
-
-        if hasattr(self, "_original_queue") and self._original_queue:
-            if 0 <= old_index < len(self._original_queue) and 0 <= new_index < len(self._original_queue):
-                orig_track = self._original_queue.pop(old_index)
-                self._original_queue.insert(new_index, orig_track)
-
-        if current_t and current_t in self._queue:
-            self._current_index = self._queue.index(current_t)
-
+    def move_track(self, old_index: int, new_index: int) -> None:
+        self.playlist.move(old_index, new_index)
         self._notify_state()
 
     async def _load_and_play_track(self, track: Track) -> None:
         """Resolves the audio stream and starts playback via native Flet Audio."""
         self._is_loading_stream = True
-        self._position_seconds = 0.0
         self._is_playing = False
-        self.state.is_playing = False
         self.state.reset_idle()
-
-        # Update track title and UI immediately
         self._notify_track()
 
         print(f"[AudioController] Preparing audio for: '{track.title}' (ID: {track.id})...")
-
         stream_url = await self.ytmusic_service.get_stream_url_async(track.id)
+
+        if self._current is not track:
+            return  # Another song was picked while this one was loading
+        self._is_loading_stream = False
         if not stream_url:
-            self._is_playing = False
-            self.state.is_playing = False
             print(f"[AudioController] Stream URL not found for '{track.title}'.")
-            self._is_loading_stream = False
             self._notify_state()
             return
-            
-        self._current_stream_url = stream_url
+
         self._loaded_track_id = track.id
-        
         if self.audio:
             self.audio.src = stream_url
-            self.audio.volume = max(0.0, min(1.0, self._volume))
+            self.audio.volume = 1.0  # Loudness follows the device volume buttons
             try:
                 self.audio.update()
             except Exception:
                 pass
             await self._safe_audio_call(self.audio.play())
             self._is_playing = True
-            self.state.is_playing = True
             print(f"[AudioController] Audio stream playing: '{track.title}'")
-
-        self._is_loading_stream = False
         self._notify_state()
 
     def _handle_track_completed(self) -> None:
-        """Advances track or repeats when audio completes."""
         if self._repeat == "one":
             self.seek(0)
-        elif self._repeat == "all" or self._current_index < len(self._queue) - 1:
+            if self.audio:
+                self._run_async(self._safe_audio_call(self.audio.resume()))
+            return
+        order = self._play_order()
+        is_last = bool(order) and self._current is not None and order[-1].id == self._current.id
+        if self._repeat == "all" or not is_last:
             self.next_track()
         else:
             self._position_seconds = self.duration_seconds
             self.pause()
 
     def _notify_track(self) -> None:
-        if self.on_track_changed and self.current_track:
+        if self.on_track_changed and self._current:
             try:
-                self.on_track_changed(self.current_track)
+                self.on_track_changed(self._current)
             except Exception as e:
                 print(f"[AudioController] Track callback note: {e}")
         self._notify_state()

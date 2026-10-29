@@ -1,86 +1,86 @@
 """
 Configuration Manager for Frame Player Kiosk.
-Handles reading, writing, and persistence of user preferences to config.json.
+All settings and their defaults live in the `Settings` dataclass; config.json only
+ever contains these keys and is rewritten atomically, and only when a value changes.
 """
 
+from dataclasses import asdict, dataclass, fields
 import json
+import os
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 from src.storage import CONFIG_FILE_PATH
 
-DEFAULT_CONFIG_PATH = CONFIG_FILE_PATH
 DEFAULT_SAMPLE_FOLDER = Path("assets/samples").resolve()
 
 
+@dataclass
+class Settings:
+    photo_folder: str = str(DEFAULT_SAMPLE_FOLDER)
+    idle_timeout_seconds: int = 60  # 0 = screensaver off
+    slideshow_interval_seconds: int = 10
+    slideshow_shuffle: bool = True
+    photo_fill_mode: str = "contain"  # "contain" or "cover"
+
+
+_KEYS = {f.name for f in fields(Settings)}
+
+
 class ConfigManager:
-    DEFAULT_CONFIG: Dict[str, Any] = {
-        "photo_folder": str(DEFAULT_SAMPLE_FOLDER),
-        "idle_timeout_seconds": 60,
-        "slideshow_interval_seconds": 8,
-        "slideshow_shuffle": True,
-        "volume": 0.75,
-        "last_played_track_id": "",
-        "repeat_mode": "off",  # off, all, one
-        "shuffle_mode": False,
-        "kiosk_fullscreen": True,
-        "show_clock_on_photo_frame": True,
-        "background_blur_radius": 24,
-        "orientation": "landscape",  # "landscape" or "portrait"
-    }
-
-    def __init__(self, config_path: Path = DEFAULT_CONFIG_PATH):
+    def __init__(self, config_path: Path = CONFIG_FILE_PATH):
         self.config_path = config_path
-        self.config: Dict[str, Any] = {}
-        self.load()
+        self.settings = self._load()
 
-    def load(self) -> Dict[str, Any]:
-        """Loads config from JSON file or initializes defaults if not present."""
-        if not self.config_path.exists():
-            self.config = dict(self.DEFAULT_CONFIG)
-            self.save()
-            return self.config
-
+    def _load(self) -> Settings:
+        """Reads config.json, ignoring unknown keys and values of the wrong type."""
+        settings = Settings()
         try:
             with open(self.config_path, "r", encoding="utf-8") as f:
-                loaded = json.load(f)
-                self.config = {**self.DEFAULT_CONFIG, **loaded}
+                data = json.load(f)
+        except FileNotFoundError:
+            data = {}
         except Exception as e:
-            print(f"[ConfigManager] Error reading {self.config_path}: {e}. Resetting to defaults.")
-            self.config = dict(self.DEFAULT_CONFIG)
-            self.save()
+            print(f"[ConfigManager] Error reading {self.config_path}: {e}. Using defaults.")
+            data = {}
 
-        # Validate photo folder existence
-        photo_dir = Path(self.config.get("photo_folder", ""))
-        if not photo_dir.exists():
-            self.config["photo_folder"] = str(DEFAULT_SAMPLE_FOLDER)
-            self.save()
+        for key, value in data.items() if isinstance(data, dict) else ():
+            default = getattr(settings, key, None)
+            if key not in _KEYS:
+                continue
+            if isinstance(default, float) and isinstance(value, (int, float)):
+                value = float(value)
+            if isinstance(value, type(default)):
+                setattr(settings, key, value)
 
-        return self.config
+        if not Path(settings.photo_folder).exists():
+            settings.photo_folder = str(DEFAULT_SAMPLE_FOLDER)
+        self._write(settings)  # Drops stale keys left by older versions
+        return settings
 
-    def save(self) -> None:
-        """Persists current configuration to JSON file."""
+    def _write(self, settings: Settings) -> None:
+        tmp = self.config_path.with_suffix(".tmp")
         try:
-            with open(self.config_path, "w", encoding="utf-8") as f:
-                json.dump(self.config, f, indent=2, ensure_ascii=False)
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(asdict(settings), f, indent=2, ensure_ascii=False)
+            os.replace(tmp, self.config_path)
         except Exception as e:
             print(f"[ConfigManager] Error saving {self.config_path}: {e}")
 
-    def get(self, key: str, default: Any = None) -> Any:
-        """Retrieves a configuration value."""
-        return self.config.get(key, default)
+    def get(self, key: str) -> Any:
+        return getattr(self.settings, key)
 
-    def set(self, key: str, value: Any, auto_save: bool = True) -> None:
-        """Sets a configuration value and optionally persists immediately."""
-        self.config[key] = value
-        if auto_save:
-            self.save()
+    def set(self, key: str, value: Any) -> None:
+        """Updates one setting and saves, skipping the write if nothing changed."""
+        if key not in _KEYS:
+            raise KeyError(key)
+        if getattr(self.settings, key) != value:
+            setattr(self.settings, key, value)
+            self._write(self.settings)
 
     def set_photo_folder(self, folder_path: str) -> bool:
-        """Validates and updates the photo directory path."""
         p = Path(folder_path)
-        if p.exists() and p.is_dir():
-            self.config["photo_folder"] = str(p.resolve())
-            self.save()
+        if p.is_dir():
+            self.set("photo_folder", str(p.resolve()))
             return True
         return False

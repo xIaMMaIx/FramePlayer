@@ -1,119 +1,87 @@
 """
-Local Playlist Manager (LocalPlaylistManager).
-Handles persistence, retrieval, addition, and removal of tracks in local storage (local_playlist.json).
-Provides the primary curated queue for the CarPlay dashboard with zero network startup delay.
+Saved playlist (local_playlist.json).
+This one list is also the play queue: playing a search result adds it here,
+and the heart button adds or removes the current song.
 """
 
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import List
 
 from src.music_backend import Track
 from src.storage import LOCAL_PLAYLIST_PATH
 
-# Initial recommended tracks if newly initialized
-DEFAULT_INITIAL_TRACKS = [
-    {
-        "id": "UZM-tISUD2A",
-        "title": "[Electro] ZABO - Drown",
-        "artist": "Buried Sound",
-        "album": "Local Favorites",
-        "duration_seconds": 218.0,
-        "art_url": "https://i.ytimg.com/vi/UZM-tISUD2A/hqdefault.jpg",
-        "is_liked": True,
-    },
-    {
-        "id": "tIGNjVfvKtI",
-        "title": "NAY x TangBadVoice - ‘ยกมือขึ้น’ Another Version",
-        "artist": "gnest_official",
-        "album": "Local Favorites",
-        "duration_seconds": 184.0,
-        "art_url": "https://i.ytimg.com/vi/tIGNjVfvKtI/hqdefault.jpg",
-        "is_liked": True,
-    },
+# Only used when the playlist file has never been created
+STARTER_TRACKS = [
+    Track(
+        id="UZM-tISUD2A",
+        title="[Electro] ZABO - Drown",
+        artist="Buried Sound",
+        album="Local Favorites",
+        duration_seconds=218.0,
+        art_url="https://i.ytimg.com/vi/UZM-tISUD2A/hqdefault.jpg",
+    ),
+    Track(
+        id="tIGNjVfvKtI",
+        title="NAY x TangBadVoice - ‘ยกมือขึ้น’ Another Version",
+        artist="gnest_official",
+        album="Local Favorites",
+        duration_seconds=184.0,
+        art_url="https://i.ytimg.com/vi/tIGNjVfvKtI/hqdefault.jpg",
+    ),
 ]
 
 
 class LocalPlaylistManager:
     def __init__(self, file_path: Path = LOCAL_PLAYLIST_PATH):
         self.file_path = file_path
-        self._tracks: List[Track] = []
-        self.load()
+        self.tracks: List[Track] = self._load()
 
-    def load(self) -> List[Track]:
-        """Loads tracks from local_playlist.json or seeds defaults."""
+    def _load(self) -> List[Track]:
         if not self.file_path.exists():
-            return self._seed_defaults()
-
+            self.tracks = list(STARTER_TRACKS)
+            self._save()
+            return self.tracks
         try:
             with open(self.file_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                if isinstance(data, list) and len(data) > 0:
-                    self._tracks = [Track.from_dict(t) for t in data]
-                else:
-                    return self._seed_defaults()
+            return [Track.from_dict(t) for t in data if isinstance(t, dict) and t.get("id")]
         except Exception as e:
-            print(f"[LocalPlaylistManager] Error loading {self.file_path}: {e}")
-            return self._seed_defaults()
+            print(f"[Playlist] Error loading {self.file_path}: {e}")
+            return []
 
-        return self._tracks
-
-    def _seed_defaults(self) -> List[Track]:
-        self._tracks = [Track.from_dict(t) for t in DEFAULT_INITIAL_TRACKS]
-        self.save()
-        return self._tracks
-
-    def save(self) -> bool:
-        """Persists current tracks list to local_playlist.json."""
+    def _save(self) -> None:
+        tmp = self.file_path.with_suffix(".tmp")
         try:
-            data = [t.to_dict() for t in self._tracks]
-            with open(self.file_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-            print(f"[LocalPlaylistManager] Saved {len(self._tracks)} tracks to {self.file_path}")
-            return True
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump([t.to_dict() for t in self.tracks], f, indent=2, ensure_ascii=False)
+            os.replace(tmp, self.file_path)
         except Exception as e:
-            print(f"[LocalPlaylistManager] Error saving {self.file_path}: {e}")
+            print(f"[Playlist] Error saving {self.file_path}: {e}")
+
+    def contains(self, track_id: str) -> bool:
+        return any(t.id == track_id for t in self.tracks)
+
+    def add(self, track: Track) -> bool:
+        """Appends the track unless it is already saved. Returns True if added."""
+        if self.contains(track.id):
             return False
-
-    def get_tracks(self) -> List[Track]:
-        """Returns list of all tracks in the local playlist."""
-        return list(self._tracks)
-
-    def add_track(self, track: Track) -> bool:
-        """Adds a track to the local playlist if not already present."""
-        if self.has_track(track.id):
-            print(f"[LocalPlaylistManager] Track '{track.title}' is already in the playlist.")
-            return False
-
-        self._tracks.append(track)
-        self.save()
-        print(f"[LocalPlaylistManager] Added track: '{track.title}'")
+        self.tracks.append(track)
+        self._save()
         return True
 
-    def remove_track(self, track_id: str) -> bool:
-        """Removes a track by ID from the local playlist."""
-        initial_len = len(self._tracks)
-        self._tracks = [t for t in self._tracks if t.id != track_id]
-        if len(self._tracks) < initial_len:
-            self.save()
-            print(f"[LocalPlaylistManager] Removed track ID: {track_id}")
-            return True
-        return False
+    def remove(self, track_id: str) -> bool:
+        before = len(self.tracks)
+        self.tracks = [t for t in self.tracks if t.id != track_id]
+        if len(self.tracks) == before:
+            return False
+        self._save()
+        return True
 
-    def has_track(self, track_id: str) -> bool:
-        """Checks if a track ID already exists in the playlist."""
-        return any(t.id == track_id for t in self._tracks)
-
-    def reorder_track(self, old_index: int, new_index: int) -> bool:
-        """Reorders track from old_index to new_index and persists to disk."""
-        if 0 <= old_index < len(self._tracks) and 0 <= new_index < len(self._tracks):
-            track = self._tracks.pop(old_index)
-            self._tracks.insert(new_index, track)
-            self.save()
-            print(f"[LocalPlaylistManager] Reordered track '{track.title}' from {old_index} to {new_index}")
-            return True
-        return False
-
-    def count(self) -> int:
-        return len(self._tracks)
+    def move(self, old_index: int, new_index: int) -> bool:
+        if not (0 <= old_index < len(self.tracks) and 0 <= new_index < len(self.tracks)):
+            return False
+        self.tracks.insert(new_index, self.tracks.pop(old_index))
+        self._save()
+        return True

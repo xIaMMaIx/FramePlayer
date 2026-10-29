@@ -32,8 +32,7 @@ YDL_OPTS = {
 
 
 class YTMusicService:
-    def __init__(self, config_mgr=None):
-        self.config_mgr = config_mgr
+    def __init__(self):
         self._ytmusic = None  # Created lazily on first search to keep startup light
         self._ydl = None
         self._ydl_lock = threading.Lock()
