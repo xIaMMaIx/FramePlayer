@@ -339,7 +339,7 @@ class PhotoFrameView(ft.Container):
         is_playing = self.backend.is_playing
 
         if track and is_playing:
-            self.img_mini_art.src = track.art_url or DEFAULT_ART_URL
+            self.img_mini_art.src = track.thumb_url or DEFAULT_ART_URL
             self.txt_mini_title.value = track.title
             self.txt_mini_artist.value = track.artist
             self.mini_player_card.visible = True

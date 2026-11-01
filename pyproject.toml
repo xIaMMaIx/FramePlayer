@@ -56,6 +56,11 @@ split_per_abi = true
 # Packages run from inside a zip on Android; ytmusicapi opens its gettext .mo
 # files via Path(__file__), which fails in the zip and breaks YTMusic() (no search).
 extract_packages = ["ytmusicapi"]
+adaptive_icon_background = "#0D0E12"
+
+[tool.flet.splash]
+color = "#0D0E12"
+dark_color = "#0D0E12"
 
 [tool.flet.flutter.pubspec.dependency_overrides]
 # The flet 0.86.5 template pins jni 1.0.0, but current shared_preferences_android /

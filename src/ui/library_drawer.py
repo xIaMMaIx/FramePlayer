@@ -290,7 +290,7 @@ class LibraryDrawer(ft.Container):
                         mouse_cursor=ft.MouseCursor.GRAB,
                     ),
                     ft.Image(
-                        src=track.art_url or "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=200&q=80",
+                        src=track.thumb_url or "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=200&q=80",
                         width=40,
                         height=40,
                         border_radius=6,
@@ -460,7 +460,7 @@ class LibraryDrawer(ft.Container):
             content=ft.Row(
                 controls=[
                     ft.Image(
-                        src=track.art_url or "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=200&q=80",
+                        src=track.thumb_url or "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=200&q=80",
                         width=40,
                         height=40,
                         border_radius=6,

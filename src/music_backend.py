@@ -3,6 +3,16 @@ Track model shared by the playlist, search results and the player.
 """
 
 from dataclasses import asdict, dataclass
+import re
+
+COVER_SIZE = 720  # Sharp on tablets; about 2 MB once decoded
+THUMB_SIZE = 120
+_GOOGLE_IMAGE_SIZE = re.compile(r"=(?:w\d+-h\d+|s\d+)")
+
+
+def _resize_art(url: str, size: int) -> str:
+    """Google image URLs serve any size; search results only list a 120px one."""
+    return _GOOGLE_IMAGE_SIZE.sub(f"=w{size}-h{size}", url, count=1)
 
 
 @dataclass
@@ -19,6 +29,14 @@ class Track:
         minutes = int(self.duration_seconds // 60)
         seconds = int(self.duration_seconds % 60)
         return f"{minutes:02d}:{seconds:02d}"
+
+    @property
+    def cover_url(self) -> str:
+        return _resize_art(self.art_url, COVER_SIZE)
+
+    @property
+    def thumb_url(self) -> str:
+        return _resize_art(self.art_url, THUMB_SIZE).replace("/maxresdefault.", "/mqdefault.")
 
     def to_dict(self) -> dict:
         return asdict(self)

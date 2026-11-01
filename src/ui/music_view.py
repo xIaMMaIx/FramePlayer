@@ -421,7 +421,7 @@ class MusicPlayerView(ft.Container):
                         ),
                         # Mini thumbnail with rounded border
                         ft.Image(
-                            src=track.art_url or self._get_default_art(),
+                            src=track.thumb_url or self._get_default_art(),
                             width=44,
                             height=44,
                             border_radius=8,
@@ -561,7 +561,7 @@ class MusicPlayerView(ft.Container):
         is_playing = self.backend.is_playing
 
         if track:
-            art_src = track.art_url or self._get_default_art()
+            art_src = track.cover_url or self._get_default_art()
             self.img_art.src = art_src
             
             self.txt_title.value = track.title
