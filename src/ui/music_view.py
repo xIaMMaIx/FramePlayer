@@ -86,15 +86,20 @@ class MusicPlayerView(ft.Container):
             tooltip="Save to My Playlist",
         )
 
-        # --- Right Panel: Quick Actions Toolbar (PopupMenu) ---
-        self.settings_menu = ft.PopupMenuButton(
+        # --- Right Panel: Header buttons ---
+        self.btn_photos = ft.IconButton(
+            icon=ft.Icons.PHOTO_LIBRARY_ROUNDED,
+            icon_color=TEXT_SECONDARY,
+            icon_size=22,
+            tooltip="Photo Frame",
+            on_click=lambda e: self.on_open_photos() if self.on_open_photos else None,
+        )
+        self.btn_settings = ft.IconButton(
             icon=ft.Icons.SETTINGS_ROUNDED,
-            items=[
-                ft.PopupMenuItem(icon=ft.Icons.PLAYLIST_PLAY_ROUNDED, content="Search & Playlist", on_click=lambda e: self.on_open_library() if self.on_open_library else None),
-                ft.PopupMenuItem(icon=ft.Icons.PHOTO_LIBRARY_ROUNDED, content="Photo Frame", on_click=lambda e: self.on_open_photos() if self.on_open_photos else None),
-                ft.PopupMenuItem(icon=ft.Icons.SETTINGS_OUTLINED, content="Settings", on_click=lambda e: self.on_open_settings() if self.on_open_settings else None),
-            ],
-            tooltip="Menu"
+            icon_color=TEXT_PRIMARY,
+            icon_size=24,
+            tooltip="Settings",
+            on_click=lambda e: self.on_open_settings() if self.on_open_settings else None,
         )
 
         # --- Right Panel: Controls, Sliders & Mini Queue ---
@@ -291,26 +296,31 @@ class MusicPlayerView(ft.Container):
             expand=1 if not is_portrait else False,
         )
 
-        # Upcoming Queue Header
+        # Playlist header: tap the title to search and manage songs
         queue_header = ft.Row(
             controls=[
-                ft.Row(
-                    [
-                        ft.Icon(ft.Icons.QUEUE_MUSIC_ROUNDED, size=18, color=ACCENT_RED),
-                        ft.Text("My Playlist", size=15, weight=ft.FontWeight.BOLD, color=TEXT_PRIMARY),
-                    ],
-                    spacing=6,
+                ft.Container(
+                    content=ft.Row(
+                        [
+                            ft.Icon(ft.Icons.QUEUE_MUSIC_ROUNDED, size=18, color=ACCENT_RED),
+                            ft.Text("My Playlist", size=15, weight=ft.FontWeight.BOLD, color=TEXT_PRIMARY),
+                            self.txt_queue_count,
+                            ft.Icon(ft.Icons.CHEVRON_RIGHT_ROUNDED, size=20, color=TEXT_MUTED),
+                        ],
+                        spacing=6,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    padding=ft.Padding.symmetric(horizontal=6, vertical=10),
+                    border_radius=10,
+                    ink=True,
+                    expand=True,
+                    tooltip="Search & manage playlist",
+                    on_click=lambda e: self.on_open_library() if self.on_open_library else None,
                 ),
-                ft.Row(
-                    [
-                        self.txt_queue_count,
-                        self.settings_menu,
-                    ],
-                    spacing=12,
-                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                )
+                self.btn_photos,
+                self.btn_settings,
             ],
-            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            spacing=0,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
