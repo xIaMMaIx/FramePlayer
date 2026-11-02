@@ -33,6 +33,7 @@ exclude = [
     "config.json",
     "local_playlist.json",
     "data",
+    "design",
     "build_apk.bat",
     "README.md",
     "config.example.json",
