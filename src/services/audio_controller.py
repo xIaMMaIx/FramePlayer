@@ -14,8 +14,11 @@ from src.services.local_playlist_manager import LocalPlaylistManager
 from src.services.ytmusic_service import YTMusicService
 from src.state import AppState
 
-DEFAULT_AUDIO_PLACEHOLDER = "https://raw.githubusercontent.com/mdn/webaudio-examples/main/audio-analyser/viper.mp3"
+# flet_audio.Audio needs a source before the first song is picked. A bundled silent
+# clip (assets/silence.wav) costs nothing, unlike a remote file fetched on every start.
+DEFAULT_AUDIO_PLACEHOLDER = "silence.wav"
 REPEAT_MODES = ("off", "all", "one")
+PREFETCH_DELAY_SECONDS = 10.0  # How far into a song the next one's stream URL is looked up
 
 
 def _parse_duration_to_seconds(val) -> float:
@@ -55,6 +58,8 @@ class AudioController:
         self._current: Optional[Track] = playlist.tracks[0] if playlist.tracks else None
         self._last_index: int = 0  # Where to continue if the current song was removed
         self._shuffle_ids: List[str] = []
+        self._shuffle_seen: set = set()
+        self._prefetch_token = 0  # Bumped to supersede a pending next-song lookup
         self._is_playing = False
         self._is_loading_stream = False
         self._position_seconds = 0.0
@@ -63,13 +68,20 @@ class AudioController:
         self._repeat = "off"
         self._loaded_track_id: Optional[str] = None
 
-        self.on_track_changed: Optional[Callable[[Track], None]] = None
-        self.on_state_changed: Optional[Callable[[], None]] = None
+        # Each listener is called once per change: new song, play/pause, seek,
+        # shuffle/repeat or a playlist edit.
+        self._listeners: List[Callable[[], None]] = []
+
+        self._source_ready = asyncio.Event()  # Set when the player has buffered a new source
 
         if self.audio:
             self.audio.on_state_change = self._on_flet_audio_state_change
             self.audio.on_position_change = self._on_flet_audio_position_change
             self.audio.on_duration_change = self._on_flet_audio_duration_change
+            self.audio.on_loaded = self._on_flet_audio_loaded
+
+    def add_listener(self, callback: Callable[[], None]) -> None:
+        self._listeners.append(callback)
 
     # --- Flet Audio events ---
 
@@ -81,6 +93,9 @@ class AudioController:
             print(f"[AudioController] Flet audio operation timed out ({timeout}s).")
         except Exception as e:
             print(f"[AudioController] Flet audio operation note: {e}")
+
+    def _on_flet_audio_loaded(self, e) -> None:
+        self._source_ready.set()
 
     def _on_flet_audio_state_change(self, e) -> None:
         if "completed" in str(getattr(e, "state", "")).lower():
@@ -146,9 +161,11 @@ class AudioController:
         if not self._shuffle:
             return tracks
         by_id = {t.id: t for t in tracks}
-        missing = [t.id for t in tracks if t.id not in self._shuffle_ids]
-        random.shuffle(missing)
-        self._shuffle_ids = [i for i in self._shuffle_ids if i in by_id] + missing
+        if by_id.keys() != self._shuffle_seen:  # Only when the playlist was edited
+            missing = [i for i in by_id if i not in self._shuffle_seen]
+            random.shuffle(missing)
+            self._shuffle_ids = [i for i in self._shuffle_ids if i in by_id] + missing
+            self._shuffle_seen = set(self._shuffle_ids)
         return [by_id[i] for i in self._shuffle_ids]
 
     def _step(self, delta: int) -> Optional[Track]:
@@ -189,6 +206,11 @@ class AudioController:
         ids = [t.id for t in self.playlist.tracks]
         if track.id in ids:
             self._last_index = ids.index(track.id)
+        self._is_loading_stream = True
+        self._is_playing = False
+        self._prefetch_token += 1  # A pending lookup for the previous song's successor is moot
+        self.state.reset_idle()
+        self._notify_state()  # One UI refresh now, one more when the stream starts
         self._run_async(self._load_and_play_track(track))
 
     def play(self) -> None:
@@ -200,6 +222,7 @@ class AudioController:
         if self._loaded_track_id == self._current.id and self.audio:
             self._is_playing = True
             self._run_async(self._safe_audio_call(self.audio.resume()))
+            self._schedule_prefetch()
             self._notify_state()
         else:
             self._start(self._current)
@@ -229,13 +252,16 @@ class AudioController:
 
     def seek(self, position_seconds: float) -> None:
         self._position_seconds = max(0.0, min(position_seconds, self.duration_seconds))
-        if self.audio:
+        # Not while a song is still loading: the native player would keep a seek issued
+        # before it is ready and apply it to every following song as well.
+        if self.audio and not self._is_loading_stream:
             self._run_async(self._safe_audio_call(self.audio.seek(int(self._position_seconds * 1000))))
         self._notify_state()
 
     def toggle_shuffle(self) -> bool:
         self._shuffle = not self._shuffle
         self._shuffle_ids = [self._current.id] if self._shuffle and self._current else []
+        self._shuffle_seen = set(self._shuffle_ids)
         self._notify_state()
         return self._shuffle
 
@@ -269,34 +295,87 @@ class AudioController:
 
     async def _load_and_play_track(self, track: Track) -> None:
         """Resolves the audio stream and starts playback via native Flet Audio."""
-        self._is_loading_stream = True
-        self._is_playing = False
-        self.state.reset_idle()
-        self._notify_track()
-
         print(f"[AudioController] Preparing audio for: '{track.title}' (ID: {track.id})...")
-        stream_url = await self.ytmusic_service.get_stream_url_async(track.id)
+        # Skipping quickly through songs queues one extraction per song on the single
+        # worker; the ones already skipped past are dropped instead of resolved.
+        stream_url = await self.ytmusic_service.get_stream_url_async(
+            track.id, still_wanted=lambda: self._current is track
+        )
 
         if self._current is not track:
             return  # Another song was picked while this one was loading
-        self._is_loading_stream = False
         if not stream_url:
             print(f"[AudioController] Stream URL not found for '{track.title}'.")
+            self._is_loading_stream = False
             self._notify_state()
             return
 
         self._loaded_track_id = track.id
         if self.audio:
-            self.audio.src = stream_url
             self.audio.volume = 1.0  # Loudness follows the device volume buttons
-            try:
-                self.audio.update()
-            except Exception:
-                pass
-            await self._safe_audio_call(self.audio.play())
+            if self.audio.src != stream_url:
+                # The native player buffers a new stream for several seconds on a slow
+                # tablet; is_loading stays set until it reports the source as loaded.
+                # resume() instead of play(): play() first seeks to 0, and a seek issued
+                # before the stream is buffered makes Android re-buffer right after
+                # playback starts (measured: up to 4 s more before any sound).
+                self._source_ready.clear()
+                self.audio.src = stream_url
+                try:
+                    self.audio.update()
+                except Exception:
+                    pass
+                await self._safe_audio_call(self.audio.resume())  # Starts by itself once buffered
+                await self._safe_audio_call(self._source_ready.wait())
+                if self._current is track:
+                    await self._safe_audio_call(self.audio.resume())  # In case it was paused meanwhile
+            else:
+                # Same stream as before (e.g. a one-song playlist on repeat): start it over
+                try:
+                    self.audio.update()
+                except Exception:
+                    pass
+                await self._safe_audio_call(self.audio.play())
+            if self._current is not track:
+                return  # Another song was picked while the player was buffering
             self._is_playing = True
             print(f"[AudioController] Audio stream playing: '{track.title}'")
+            self._schedule_prefetch()
+        self._is_loading_stream = False
         self._notify_state()
+
+    # --- Next-song prefetch ---
+
+    def _upcoming_track(self) -> Optional[Track]:
+        """The song that will start by itself when the current one ends, if any."""
+        if not self._current or self._repeat == "one":
+            return None
+        order = self._play_order()
+        if not order or (order[-1].id == self._current.id and self._repeat != "all"):
+            return None  # End of the playlist: playback stops there
+        upcoming = self._step(+1)
+        return upcoming if upcoming and upcoming.id != self._current.id else None
+
+    def _schedule_prefetch(self) -> None:
+        """
+        Looks up the next song's stream URL a little into the current one, so the change
+        of song skips that lookup (seconds on a slow tablet). Any earlier request is
+        superseded, which keeps quick skipping from queueing lookups nobody needs.
+        """
+        self._prefetch_token += 1
+        self._run_async(self._prefetch_upcoming(self._prefetch_token))
+
+    async def _prefetch_upcoming(self, token: int) -> None:
+        await asyncio.sleep(PREFETCH_DELAY_SECONDS)
+
+        def still_wanted() -> bool:
+            return token == self._prefetch_token and self._is_playing
+
+        upcoming = self._upcoming_track() if still_wanted() else None
+        if upcoming is None or self.ytmusic_service.has_stream_url(upcoming.id):
+            return
+        if await self.ytmusic_service.get_stream_url_async(upcoming.id, still_wanted=still_wanted):
+            print(f"[AudioController] Next song ready: '{upcoming.title}'")
 
     def _handle_track_completed(self) -> None:
         if self._repeat == "one":
@@ -312,17 +391,9 @@ class AudioController:
             self._position_seconds = self.duration_seconds
             self.pause()
 
-    def _notify_track(self) -> None:
-        if self.on_track_changed and self._current:
-            try:
-                self.on_track_changed(self._current)
-            except Exception as e:
-                print(f"[AudioController] Track callback note: {e}")
-        self._notify_state()
-
     def _notify_state(self) -> None:
-        if self.on_state_changed:
+        for callback in self._listeners:
             try:
-                self.on_state_changed()
+                callback()
             except Exception as e:
-                print(f"[AudioController] State callback note: {e}")
+                print(f"[AudioController] Listener note: {e}")

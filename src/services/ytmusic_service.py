@@ -9,7 +9,7 @@ from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 import threading
 import time
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from src.music_backend import Track
 
@@ -30,11 +30,22 @@ YDL_OPTS = {
     "extractor_args": {"youtube": {"player_client": ["visionos", "android_vr"]}},
 }
 
+# Tried first: one player client and no HLS/DASH manifests, which is two requests
+# instead of four and still yields itag 140. Anything it cannot resolve falls back
+# to the full options above.
+YDL_OPTS_FAST = {
+    **YDL_OPTS,
+    "format": "140/bestaudio[ext=m4a]/bestaudio",
+    "extractor_args": {
+        "youtube": {"player_client": ["visionos"], "skip": ["dash", "hls", "translated_subs"]}
+    },
+}
+
 
 class YTMusicService:
     def __init__(self):
         self._ytmusic = None  # Created lazily on first search to keep startup light
-        self._ydl = None
+        self._ydl = {}  # fast flag -> YoutubeDL, each created on first use
         self._ydl_lock = threading.Lock()
         self._stream_cache: "OrderedDict[str, tuple[str, float]]" = OrderedDict()
         self._executor = ThreadPoolExecutor(max_workers=1)
@@ -89,17 +100,14 @@ class YTMusicService:
             self._stream_cache.move_to_end(video_id)
             return cached[0]
 
-        try:
-            with self._ydl_lock:
-                if self._ydl is None:
-                    import yt_dlp
-
-                    self._ydl = yt_dlp.YoutubeDL(YDL_OPTS)
-                info = self._ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
-            stream_url = info.get("url")
-        except Exception as e:
-            print(f"[YTMusicService] Stream extraction failed for {video_id}: {e}")
-            return None
+        stream_url = None
+        for fast in (True, False):
+            try:
+                stream_url = self._extract(video_id, fast)
+            except Exception as e:
+                print(f"[YTMusicService] {'Fast' if fast else 'Full'} extraction failed for {video_id}: {e}")
+            if stream_url:
+                break
 
         if stream_url:
             self._stream_cache[video_id] = (stream_url, now + STREAM_CACHE_TTL)
@@ -107,7 +115,33 @@ class YTMusicService:
                 self._stream_cache.popitem(last=False)
         return stream_url
 
-    async def get_stream_url_async(self, video_id: str) -> Optional[str]:
-        """Extracts the stream URL on the single worker thread."""
+    def has_stream_url(self, video_id: str) -> bool:
+        """True if a still-valid stream URL is cached, i.e. the song can start without a lookup."""
+        cached = self._stream_cache.get(video_id)
+        return bool(cached) and time.time() < cached[1]
+
+    def _extract(self, video_id: str, fast: bool) -> Optional[str]:
+        with self._ydl_lock:
+            ydl = self._ydl.get(fast)
+            if ydl is None:
+                import yt_dlp
+
+                ydl = self._ydl[fast] = yt_dlp.YoutubeDL(YDL_OPTS_FAST if fast else YDL_OPTS)
+            info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
+        return info.get("url") if info else None
+
+    async def get_stream_url_async(
+        self, video_id: str, still_wanted: Optional[Callable[[], bool]] = None
+    ) -> Optional[str]:
+        """
+        Extracts the stream URL on the single worker thread. `still_wanted` is checked
+        when the job leaves the queue, so a song skipped while waiting costs no request.
+        """
+
+        def job() -> Optional[str]:
+            if still_wanted is not None and not still_wanted():
+                return None
+            return self.get_stream_url(video_id)
+
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self._executor, self.get_stream_url, video_id)
+        return await loop.run_in_executor(self._executor, job)

@@ -1,16 +1,19 @@
 """
 CarPlay / Android Auto-style Music Dashboard View.
 Features Split-View layout:
-- Left: Ambient Blurred Cover Art Backdrop, Large Album Art, Title, Artist, and Like button.
-- Right: Menu (Library, Photo Frame, Settings), large touch controls, seek slider,
-         and the playlist (which is also the play queue).
+- Left: Large Album Art, Title, Artist, Like button, seek slider and transport controls.
+- Right: Menu (Library, Photo Frame, Settings) and the playlist (which is also the play queue).
+
+Refreshes are incremental: playlist rows are built once per song and reused, and each
+refresh sends only the controls that changed instead of re-sending the whole view.
 """
 
-from typing import Callable, Optional
+from typing import Callable, Dict, List, Optional
 import flet as ft
 
+from src.music_backend import Track
 from src.services.audio_controller import AudioController
-from src.state import AppState
+from src.state import AppMode, AppState
 from src.ui.theme import (
     ACCENT_RED,
     BORDER_RADIUS_ROUND,
@@ -18,9 +21,102 @@ from src.ui.theme import (
     TEXT_MUTED,
     TEXT_PRIMARY,
     TEXT_SECONDARY,
+    THUMB_CACHE_HEIGHT,
     glass_card,
     DEFAULT_ART_URL,
 )
+
+
+def _format_time(seconds: float) -> str:
+    return f"{int(seconds // 60):02d}:{int(seconds % 60):02d}"
+
+
+class _QueueRow:
+    """One playlist row. Built once per song; afterwards only its highlight changes."""
+
+    def __init__(self, track: Track, key: str, on_select: Callable[[str], None]):
+        self.is_active = False
+        self.icon_handle = ft.Icon(ft.Icons.DRAG_HANDLE_ROUNDED, size=20, color=TEXT_MUTED)
+        self.txt_title = ft.Text(
+            track.title,
+            size=14,
+            weight=ft.FontWeight.W_500,
+            color=TEXT_PRIMARY,
+            max_lines=2,
+            overflow=ft.TextOverflow.ELLIPSIS,
+        )
+        self.icon_state = ft.Icon(ft.Icons.ACCESS_TIME_ROUNDED, size=16, color=TEXT_MUTED)
+        self.txt_duration = ft.Text(
+            track.formatted_duration,
+            size=12,
+            color=TEXT_MUTED,
+            weight=ft.FontWeight.NORMAL,
+        )
+        self.control = ft.Container(
+            key=key,
+            content=ft.Row(
+                controls=[
+                    # Drag handle icon for reordering
+                    ft.ReorderableDragHandle(
+                        content=ft.Container(content=self.icon_handle, padding=ft.Padding.only(right=2)),
+                        mouse_cursor=ft.MouseCursor.GRAB,
+                    ),
+                    # Mini thumbnail with rounded border
+                    ft.Image(
+                        src=track.thumb_url or DEFAULT_ART_URL,
+                        width=44,
+                        height=44,
+                        border_radius=8,
+                        fit=ft.BoxFit.COVER,
+                        cache_height=THUMB_CACHE_HEIGHT,
+                    ),
+                    # Dedicated spacing container between thumbnail and text
+                    ft.Container(width=4),
+                    # Track & Artist Column
+                    ft.Column(
+                        controls=[
+                            self.txt_title,
+                            ft.Text(
+                                track.artist,
+                                size=12,
+                                color=TEXT_SECONDARY,
+                                max_lines=1,
+                                overflow=ft.TextOverflow.ELLIPSIS,
+                            ),
+                        ],
+                        spacing=2,
+                        expand=True,
+                    ),
+                    # Equalizer icon (playing) or clock, then the duration
+                    self.icon_state,
+                    self.txt_duration,
+                ],
+                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=6,
+            ),
+            padding=ft.Padding.symmetric(horizontal=10, vertical=8),
+            border_radius=10,
+            bgcolor="rgba(255, 255, 255, 0.03)",
+            ink=True,
+            on_click=lambda e: on_select(track.id),
+        )
+
+    def set_active(self, active: bool) -> bool:
+        """Highlights the playing song. Returns True if anything changed."""
+        if active == self.is_active:
+            return False
+        self.is_active = active
+        accent = ACCENT_RED if active else TEXT_MUTED
+        self.icon_handle.color = accent
+        self.txt_title.weight = ft.FontWeight.BOLD if active else ft.FontWeight.W_500
+        self.icon_state.icon = ft.Icons.EQUALIZER_ROUNDED if active else ft.Icons.ACCESS_TIME_ROUNDED
+        self.icon_state.color = accent
+        self.txt_duration.color = accent
+        self.txt_duration.weight = ft.FontWeight.BOLD if active else ft.FontWeight.NORMAL
+        self.control.bgcolor = "rgba(255, 0, 51, 0.12)" if active else "rgba(255, 255, 255, 0.03)"
+        self.control.border = ft.Border.all(1, "rgba(255, 0, 51, 0.4)") if active else None
+        return True
 
 
 class MusicPlayerView(ft.Container):
@@ -34,7 +130,7 @@ class MusicPlayerView(ft.Container):
         on_open_photos: Optional[Callable[[], None]] = None,
         on_open_settings: Optional[Callable[[], None]] = None,
     ):
-        super().__init__(expand=True)
+        super().__init__(padding=16, expand=True)
         self.state = state
         self.backend = backend
         self.is_portrait = is_portrait
@@ -44,8 +140,13 @@ class MusicPlayerView(ft.Container):
         self.on_open_settings = on_open_settings
         self._is_user_seeking = False
 
+        # Playlist rows by track id, so a refresh reuses them instead of rebuilding
+        self._rows: Dict[str, _QueueRow] = {}
+        self._queue_ids: Optional[List[str]] = None
+        self._active_row: Optional[_QueueRow] = None
+
         self.img_art = ft.Image(
-            src=self._get_default_art(),
+            src=DEFAULT_ART_URL,
             aspect_ratio=16 / 9,
             fit=ft.BoxFit.COVER,
             border_radius=16,
@@ -65,15 +166,6 @@ class MusicPlayerView(ft.Container):
             size=15,
             weight=ft.FontWeight.W_500,
             color=TEXT_SECONDARY,
-            max_lines=1,
-            overflow=ft.TextOverflow.ELLIPSIS,
-        )
-
-        self.txt_album = ft.Text(
-            value="",
-            size=12,
-            weight=ft.FontWeight.W_400,
-            color=TEXT_MUTED,
             max_lines=1,
             overflow=ft.TextOverflow.ELLIPSIS,
         )
@@ -102,13 +194,11 @@ class MusicPlayerView(ft.Container):
             on_click=lambda e: self.on_open_settings() if self.on_open_settings else None,
         )
 
-        # --- Right Panel: Controls, Sliders & Mini Queue ---
-
-        # 1. Transport Controls
+        # --- Transport Controls ---
         self.btn_shuffle = ft.IconButton(
             icon=ft.Icons.SHUFFLE_ROUNDED,
             icon_color=TEXT_MUTED,
-            icon_size=24,
+            icon_size=22,
             width=48,
             height=48,
             on_click=self._handle_shuffle,
@@ -118,19 +208,18 @@ class MusicPlayerView(ft.Container):
         self.btn_prev = ft.IconButton(
             icon=ft.Icons.SKIP_PREVIOUS_ROUNDED,
             icon_color=TEXT_PRIMARY,
-            icon_size=42,
+            icon_size=28,
             on_click=self._handle_prev,
             tooltip="Previous Track",
         )
 
+        self.icon_play_pause = ft.Icon(ft.Icons.PLAY_ARROW_ROUNDED, size=26, color=TEXT_PRIMARY)
+        # Shown instead of the icon from the tap until sound starts (stream lookup + buffering)
+        self.ring_loading = ft.ProgressRing(width=22, height=22, stroke_width=2.5, color=TEXT_PRIMARY, visible=False)
         self.btn_play_pause = ft.Container(
-            content=ft.Icon(
-                ft.Icons.PLAY_ARROW_ROUNDED,
-                size=44,
-                color=TEXT_PRIMARY,
-            ),
-            width=68,
-            height=68,
+            content=ft.Stack([self.icon_play_pause, self.ring_loading], alignment=ft.Alignment.CENTER),
+            width=52,
+            height=52,
             border_radius=BORDER_RADIUS_ROUND,
             bgcolor=ACCENT_RED,
             alignment=ft.Alignment.CENTER,
@@ -146,7 +235,7 @@ class MusicPlayerView(ft.Container):
         self.btn_next = ft.IconButton(
             icon=ft.Icons.SKIP_NEXT_ROUNDED,
             icon_color=TEXT_PRIMARY,
-            icon_size=42,
+            icon_size=28,
             on_click=self._handle_next,
             tooltip="Next Track",
         )
@@ -154,14 +243,14 @@ class MusicPlayerView(ft.Container):
         self.btn_repeat = ft.IconButton(
             icon=ft.Icons.REPEAT_ROUNDED,
             icon_color=TEXT_MUTED,
-            icon_size=24,
+            icon_size=22,
             width=48,
             height=48,
             on_click=self._handle_repeat,
             tooltip="Repeat Mode",
         )
 
-        # 2. Seek Bar & Durations
+        # --- Seek Bar & Durations ---
         self.txt_elapsed = ft.Text("00:00", size=12, color=TEXT_SECONDARY, weight=ft.FontWeight.W_500)
         self.txt_total = ft.Text("00:00", size=12, color=TEXT_SECONDARY, weight=ft.FontWeight.W_500)
         self.slider_progress = ft.Slider(
@@ -175,43 +264,32 @@ class MusicPlayerView(ft.Container):
             on_change_end=self._handle_seek_end,
         )
 
-        # 3. Mini Queue List (Reorderable)
+        # --- Playlist (Reorderable) ---
         self.queue_column = ft.ReorderableListView(
             spacing=6,
             expand=True,
             show_default_drag_handles=False,
             on_reorder=self._handle_queue_reorder,
         )
-
-        # Build responsive layout (Landscape vs Portrait)
-        super().__init__(
-            padding=16,
-            expand=True,
-        )
         self.txt_queue_count = ft.Text("", size=12, color=TEXT_MUTED)
+
         self.rebuild_layout()
-
-        if self.backend:
-            self.backend.on_track_changed = lambda track: self.update_view()
-            self.backend.on_state_changed = lambda: self.update_view()
-
+        self.backend.add_listener(self._on_player_changed)
         self.update_view()
 
-    def _get_default_art(self) -> str:
-        return DEFAULT_ART_URL
+    def is_isolated(self) -> bool:
+        # Page-level updates (switching to the photo frame or settings) skip this view's
+        # controls instead of diffing every playlist row; it sends its own changes.
+        return True
 
     def set_portrait(self, is_portrait: bool) -> None:
         """Re-lays out the view when the device rotates."""
         if is_portrait != self.is_portrait:
             self.is_portrait = is_portrait
             self.rebuild_layout()
-            try:
-                self.update()
-            except Exception:
-                pass
 
     def rebuild_layout(self) -> None:
-        """Dynamically rebuilds layout with 16:9 widescreen cover art and separated controls."""
+        """Arranges the player card and the playlist side by side (landscape) or stacked (portrait)."""
         is_portrait = self.is_portrait
 
         # 16:9 Widescreen Cover Card
@@ -243,10 +321,8 @@ class MusicPlayerView(ft.Container):
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
-        # Single Combined Inline Controls & Seeker Row (Compact layout)
-        
-        # Timeline Row
-        timeline_row = ft.Row(
+        # Timeline Row; the once-a-second progress tick updates only this row
+        self._timeline_row = ft.Row(
             controls=[
                 self.txt_elapsed,
                 ft.Container(content=self.slider_progress, expand=True),
@@ -271,29 +347,22 @@ class MusicPlayerView(ft.Container):
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
-        compact_controls_row = ft.Column(
-            controls=[timeline_row, playback_btns_row],
-            spacing=2,
-        )
-
-
-
         # Unified Player Card (Artwork + Controls)
-        player_card = glass_card(
+        self._player_card = glass_card(
             content=ft.Column(
                 controls=[
                     art_card,
                     ft.Container(height=0),
                     info_row,
                     ft.Divider(color="rgba(255, 255, 255, 0.08)", height=8),
-                    compact_controls_row,
+                    ft.Column(controls=[self._timeline_row, playback_btns_row], spacing=2),
                 ],
                 spacing=4,
-                expand=True if not is_portrait else False,
+                expand=not is_portrait,
                 scroll=ft.ScrollMode.AUTO,
             ),
-            padding=ft.Padding(16, 12, 16, 12) if not is_portrait else ft.Padding(12, 12, 12, 12),
-            expand=1 if not is_portrait else False,
+            padding=ft.Padding(12, 12, 12, 12) if is_portrait else ft.Padding(16, 12, 16, 12),
+            expand=False if is_portrait else 1,
         )
 
         # Playlist header: tap the title to search and manage songs
@@ -348,202 +417,57 @@ class MusicPlayerView(ft.Container):
             bgcolor=SURFACE_CARD,
         )
 
+        # Portrait stacks the two cards with smaller titles; landscape is a 50/50 split
+        self.txt_title.size = 16 if is_portrait else 20
+        self.txt_artist.size = 12 if is_portrait else 14
         if is_portrait:
-            # Sizing for portrait (Compact inline buttons)
-            self.txt_title.size = 16
-            self.txt_artist.size = 12
-            self.btn_play_pause.width = 52
-            self.btn_play_pause.height = 52
-            if hasattr(self.btn_play_pause.content, "size"):
-                self.btn_play_pause.content.size = 26
-            self.btn_prev.icon_size = 28
-            self.btn_next.icon_size = 28
-            self.btn_shuffle.icon_size = 22
-            self.btn_repeat.icon_size = 22
-
-            self.content = ft.Column(
-                controls=[
-                    player_card,
-                    queue_panel,
-                ],
-                spacing=10,
-                expand=True,
-            )
+            self.content = ft.Column(controls=[self._player_card, queue_panel], spacing=10, expand=True)
         else:
-            # Sizing for landscape (Equal 50/50 left and right split, sleek inline player)
-            self.txt_title.size = 20
-            self.txt_artist.size = 14
-            self.btn_play_pause.width = 52
-            self.btn_play_pause.height = 52
-            if hasattr(self.btn_play_pause.content, "size"):
-                self.btn_play_pause.content.size = 26
-            self.btn_prev.icon_size = 28
-            self.btn_next.icon_size = 28
-            self.btn_shuffle.icon_size = 22
-            self.btn_repeat.icon_size = 22
+            self.content = ft.Row(controls=[self._player_card, queue_panel], spacing=16, expand=True)
 
-            self.content = ft.Row(
-                controls=[
-                    player_card,
-                    queue_panel,
-                ],
-                spacing=16,
-                expand=True,
-            )
-
-        try:
-            self.update()
-        except Exception:
-            pass
-
-    def _render_queue_list(self) -> None:
-        """Renders upcoming tracks with drag handles for live reordering."""
-        self.queue_column.controls.clear()
-        current_track = self.backend.current_track
-
-        for idx, track in enumerate(self.backend.queue):
-            is_active = current_track and current_track.id == track.id
-            item = ft.Container(
-                key=f"queue_track_{track.id}_{idx}",
-                content=ft.Row(
-                    controls=[
-                        # Drag handle icon for reordering
-                        ft.ReorderableDragHandle(
-                            content=ft.Container(
-                                content=ft.Icon(
-                                    ft.Icons.DRAG_HANDLE_ROUNDED,
-                                    size=20,
-                                    color=ACCENT_RED if is_active else TEXT_MUTED,
-                                ),
-                                padding=ft.Padding.only(right=2),
-                            ),
-                            mouse_cursor=ft.MouseCursor.GRAB,
-                        ),
-                        # Mini thumbnail with rounded border
-                        ft.Image(
-                            src=track.thumb_url or self._get_default_art(),
-                            width=44,
-                            height=44,
-                            border_radius=8,
-                            fit=ft.BoxFit.COVER,
-                        ),
-                        # Dedicated spacing container between thumbnail and text
-                        ft.Container(width=4),
-                        # Track & Artist Column
-                        ft.Column(
-                            controls=[
-                                ft.Text(
-                                    track.title,
-                                    size=14,
-                                    weight=ft.FontWeight.BOLD if is_active else ft.FontWeight.W_500,
-                                    color=TEXT_PRIMARY,
-                                    max_lines=2,
-                                    overflow=ft.TextOverflow.ELLIPSIS,
-                                ),
-                                ft.Text(
-                                    track.artist,
-                                    size=12,
-                                    color=TEXT_SECONDARY,
-                                    max_lines=1,
-                                    overflow=ft.TextOverflow.ELLIPSIS,
-                                ),
-                            ],
-                            spacing=2,
-                            expand=True,
-                        ),
-                        # Equalizer icon or duration
-                        ft.Icon(
-                            ft.Icons.EQUALIZER_ROUNDED if is_active else ft.Icons.ACCESS_TIME_ROUNDED,
-                            size=16,
-                            color=ACCENT_RED if is_active else TEXT_MUTED,
-                        ),
-                        ft.Text(
-                            track.formatted_duration,
-                            size=12,
-                            color=ACCENT_RED if is_active else TEXT_MUTED,
-                            weight=ft.FontWeight.BOLD if is_active else ft.FontWeight.NORMAL,
-                        ),
-                    ],
-                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                    spacing=6,
-                ),
-                padding=ft.Padding.symmetric(horizontal=10, vertical=8),
-                border_radius=10,
-                bgcolor="rgba(255, 0, 51, 0.12)" if is_active else "rgba(255, 255, 255, 0.03)",
-                border=ft.Border.all(1, "rgba(255, 0, 51, 0.4)") if is_active else None,
-                ink=True,
-                on_click=lambda e, t_id=track.id: self._handle_track_select(t_id),
-            )
-            self.queue_column.controls.append(item)
+        self._push(self)
 
     # --- Event Handlers ---
+    # The backend notifies its listeners on every change, which refreshes the view.
+
+    def _on_player_changed(self) -> None:
+        # Hidden behind the photo frame or settings: main.py refreshes on the way back
+        if self.state.mode == AppMode.MUSIC_PLAYER:
+            self.update_view()
 
     def _handle_queue_reorder(self, e: ft.OnReorderEvent) -> None:
         self.on_interaction()
-        old_idx = e.old_index
-        new_idx = e.new_index
-        if old_idx is None or new_idx is None or old_idx == new_idx:
+        if e.old_index is None or e.new_index is None or e.old_index == e.new_index:
             return
-
-        self.backend.move_track(old_idx, new_idx)
-        self.update_view()
+        self.backend.move_track(e.old_index, e.new_index)
 
     def _handle_track_select(self, track_id: str) -> None:
         self.on_interaction()
-        # If clicked track is already the active playing track, keep playing without restarting
-        if self.backend.current_track and self.backend.current_track.id == track_id and self.backend.is_playing:
-            return
-
-        self.backend.play_track_by_id(track_id)
-        self.state.reset_idle()
-        self.update_view()
+        self.backend.play_track_by_id(track_id)  # Keeps playing if it is already the current song
 
     def _handle_play_pause(self, e) -> None:
         self.on_interaction()
         self.backend.toggle_play()
-        self.state.reset_idle()
-        self.update_view()
 
     def _handle_next(self, e) -> None:
         self.on_interaction()
         self.backend.next_track()
-        self.state.reset_idle()
-        self.update_view()
 
     def _handle_prev(self, e) -> None:
         self.on_interaction()
         self.backend.prev_track()
-        self.state.reset_idle()
-        self.update_view()
 
     def _handle_shuffle(self, e) -> None:
         self.on_interaction()
-        is_shuffled = self.backend.toggle_shuffle()
-        self.btn_shuffle.icon_color = ACCENT_RED if is_shuffled else TEXT_MUTED
-        if getattr(self.btn_shuffle, "page", None):
-            self.btn_shuffle.update()
-        self.update_view()
+        self.backend.toggle_shuffle()
 
     def _handle_repeat(self, e) -> None:
         self.on_interaction()
-        mode = self.backend.cycle_repeat()
-        if mode == "one":
-            self.btn_repeat.icon = ft.Icons.REPEAT_ONE_ROUNDED
-            self.btn_repeat.icon_color = ACCENT_RED
-        elif mode == "all":
-            self.btn_repeat.icon = ft.Icons.REPEAT_ROUNDED
-            self.btn_repeat.icon_color = ACCENT_RED
-        else:
-            self.btn_repeat.icon = ft.Icons.REPEAT_ROUNDED
-            self.btn_repeat.icon_color = TEXT_MUTED
-        if getattr(self.btn_repeat, "page", None):
-            self.btn_repeat.update()
+        self.backend.cycle_repeat()
 
     def _handle_like_toggle(self, e) -> None:
         self.on_interaction()
         self.backend.toggle_saved()  # Heart = saved in My Playlist
-        self.update_view()
 
     def _handle_seek_start(self, e) -> None:
         self.on_interaction()
@@ -551,72 +475,104 @@ class MusicPlayerView(ft.Container):
 
     def _handle_seek_end(self, e) -> None:
         self._is_user_seeking = False
-        target_pos = float(e.control.value)
-        self.backend.seek(target_pos)
-        self.update_view()
+        self.backend.seek(float(e.control.value))
 
-    def update_view(self) -> None:
-        """Full refresh of music view controls, blurred background, and metadata."""
-        track = self.backend.current_track
-        is_playing = self.backend.is_playing
+    # --- Refresh ---
 
-        if track:
-            art_src = track.cover_url or self._get_default_art()
-            self.img_art.src = art_src
-            
-            self.txt_title.value = track.title
-            self.txt_artist.value = track.artist
-            self.txt_album.value = track.album
-            self.txt_total.value = track.formatted_duration
-            self.slider_progress.max = max(1.0, track.duration_seconds)
-            saved = self.backend.is_current_saved
-            self.btn_like.icon = ft.Icons.FAVORITE_ROUNDED if saved else ft.Icons.FAVORITE_BORDER_ROUNDED
-            self.btn_like.icon_color = ACCENT_RED if saved else TEXT_SECONDARY
-
-        # Play/Pause Icon
-        icon_ctrl = self.btn_play_pause.content
-        if hasattr(icon_ctrl, "icon"):
-            icon_ctrl.icon = ft.Icons.PAUSE_ROUNDED if is_playing else ft.Icons.PLAY_ARROW_ROUNDED
-        elif hasattr(icon_ctrl, "name"):
-            icon_ctrl.name = ft.Icons.PAUSE_ROUNDED if is_playing else ft.Icons.PLAY_ARROW_ROUNDED
-
-        # Shuffle & Repeat Highlights
-        self.btn_shuffle.icon_color = ACCENT_RED if self.backend.shuffle else TEXT_MUTED
-        if self.backend.repeat == "one":
-            self.btn_repeat.icon = ft.Icons.REPEAT_ONE_ROUNDED
-            self.btn_repeat.icon_color = ACCENT_RED
-        elif self.backend.repeat == "all":
-            self.btn_repeat.icon = ft.Icons.REPEAT_ROUNDED
-            self.btn_repeat.icon_color = ACCENT_RED
-        else:
-            self.btn_repeat.icon = ft.Icons.REPEAT_ROUNDED
-            self.btn_repeat.icon_color = TEXT_MUTED
-
-        # Update progress if not currently being scrubbed
-        if not self._is_user_seeking:
-            pos = self.backend.position_seconds
-            self.slider_progress.value = min(pos, self.slider_progress.max)
-            mins = int(pos // 60)
-            secs = int(pos % 60)
-            self.txt_elapsed.value = f"{mins:02d}:{secs:02d}"
-
-        self.txt_queue_count.value = f"{len(self.backend.queue)} tracks"
-        self._render_queue_list()
+    def _push(self, *controls: ft.Control) -> None:
+        """Sends pending changes of just these controls; a no-op while the view is off the page."""
+        if not controls:
+            return  # page.update() without arguments would diff the whole page
         try:
-            self.update()
+            self.page.update(*controls)
         except Exception:
             pass
 
+    def update_view(self, push: bool = True) -> None:
+        """
+        Syncs every control with the player and sends what changed: the player card
+        plus either the two playlist rows whose highlight moved or, when songs were
+        added, removed or reordered, the playlist itself.
+        Pass push=False while the view is being put back on the page: it is then sent
+        whole by that page update.
+        """
+        self._sync_now_playing()
+        self._sync_transport()
+        self._sync_progress()
+        changed = self._sync_queue()
+        if push:
+            self._push(self._player_card, *changed)
+
     def update_progress_only(self) -> None:
-        """Lightweight tick update for seeker and timestamp without rebuilding queue."""
+        """Once-a-second tick: moves the seek bar and timestamp in a single small update."""
         if not self._is_user_seeking:
-            try:
-                pos = self.backend.position_seconds
-                self.slider_progress.value = min(pos, self.slider_progress.max)
-                mins = int(pos // 60)
-                secs = int(pos % 60)
-                self.txt_elapsed.value = f"{mins:02d}:{secs:02d}"
-                self.slider_progress.update()
-                self.txt_elapsed.update()
-            except Exception:
-                pass
+            self._sync_progress()
+            self._push(self._timeline_row)
+
+    def _sync_now_playing(self) -> None:
+        track = self.backend.current_track
+        if not track:
+            return
+        self.img_art.src = track.cover_url or DEFAULT_ART_URL
+        self.txt_title.value = track.title
+        self.txt_artist.value = track.artist
+        self.txt_total.value = track.formatted_duration
+        self.slider_progress.max = max(1.0, track.duration_seconds)
+        saved = self.backend.is_current_saved
+        self.btn_like.icon = ft.Icons.FAVORITE_ROUNDED if saved else ft.Icons.FAVORITE_BORDER_ROUNDED
+        self.btn_like.icon_color = ACCENT_RED if saved else TEXT_SECONDARY
+
+    def _sync_transport(self) -> None:
+        loading = self.backend.is_loading
+        self.ring_loading.visible = loading
+        self.icon_play_pause.visible = not loading
+        self.icon_play_pause.icon = (
+            ft.Icons.PAUSE_ROUNDED if self.backend.is_playing else ft.Icons.PLAY_ARROW_ROUNDED
+        )
+        self.btn_shuffle.icon_color = ACCENT_RED if self.backend.shuffle else TEXT_MUTED
+        repeat = self.backend.repeat
+        self.btn_repeat.icon = ft.Icons.REPEAT_ONE_ROUNDED if repeat == "one" else ft.Icons.REPEAT_ROUNDED
+        self.btn_repeat.icon_color = TEXT_MUTED if repeat == "off" else ACCENT_RED
+
+    def _sync_progress(self) -> None:
+        # Leave the slider alone while it is being scrubbed
+        if not self._is_user_seeking:
+            pos = self.backend.position_seconds
+            self.slider_progress.value = min(pos, self.slider_progress.max)
+            self.txt_elapsed.value = _format_time(pos)
+
+    def _sync_queue(self) -> List[ft.Control]:
+        """Brings the playlist rows in line with the queue. Returns the controls to send."""
+        tracks = self.backend.queue
+        ids = [t.id for t in tracks]
+        changed: List[ft.Control] = []
+
+        list_changed = ids != self._queue_ids
+        if list_changed:
+            rows: Dict[str, _QueueRow] = {}
+            controls = []
+            for index, track in enumerate(tracks):
+                if track.id in rows:
+                    # Same song saved twice (possible in older playlist files)
+                    row = _QueueRow(track, f"queue_track_{track.id}_{index}", self._handle_track_select)
+                else:
+                    row = self._rows.get(track.id) or _QueueRow(
+                        track, f"queue_track_{track.id}", self._handle_track_select
+                    )
+                    rows[track.id] = row
+                controls.append(row.control)
+            self._rows = rows
+            self._queue_ids = ids
+            self.queue_column.controls = controls
+            self.txt_queue_count.value = f"{len(ids)} tracks"
+            changed += [self.queue_column, self.txt_queue_count]
+
+        current = self.backend.current_track
+        active_row = self._rows.get(current.id) if current else None
+        if active_row is not self._active_row:
+            for row, active in ((self._active_row, False), (active_row, True)):
+                # A changed list is sent whole, which covers its rows
+                if row and row.set_active(active) and not list_changed:
+                    changed.append(row.control)
+            self._active_row = active_row
+        return changed

@@ -31,6 +31,10 @@ BORDER_RADIUS_CARD = 18
 BORDER_RADIUS_BUTTON = 14
 BORDER_RADIUS_ROUND = 40
 
+# List thumbnails are drawn at 40-44px; decoding them at 3x that keeps each bitmap
+# around 90 KB in memory instead of the ~700 KB a full 480x360 YouTube still needs.
+THUMB_CACHE_HEIGHT = 132
+
 DEFAULT_ART_URL = "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=600&auto=format&fit=crop&q=80"
 
 

@@ -10,9 +10,9 @@ import os
 from pathlib import Path
 from typing import Any
 
-from src.storage import CONFIG_FILE_PATH
+from src.storage import CONFIG_FILE_PATH, SAMPLE_PHOTOS_DIR
 
-DEFAULT_SAMPLE_FOLDER = Path("assets/samples").resolve()
+DEFAULT_SAMPLE_FOLDER = SAMPLE_PHOTOS_DIR
 
 
 @dataclass

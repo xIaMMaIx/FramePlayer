@@ -1,10 +1,14 @@
 """
 Library drawer: search YouTube Music at the top, the saved playlist below.
 The playlist is also the play queue, so playing a search result adds it to the playlist.
+
+Rows are built when the drawer first opens and kept until the playlist changes, and a
+single edit (save, delete, reorder) touches just the row it concerns instead of
+rebuilding the list.
 """
 
 import asyncio
-from typing import Callable, List, Optional
+from typing import Callable, Dict, List, Optional
 import flet as ft
 
 from src.music_backend import Track
@@ -17,7 +21,10 @@ from src.ui.theme import (
     TEXT_MUTED,
     TEXT_PRIMARY,
     TEXT_SECONDARY,
+    THUMB_CACHE_HEIGHT,
 )
+
+FALLBACK_THUMB_URL = "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=200&q=80"
 
 
 class LibraryDrawer(ft.Container):
@@ -37,6 +44,14 @@ class LibraryDrawer(ft.Container):
 
         self._is_searching = False
         self._search_results: List[Track] = []
+
+        # What the current rows were built from (see open_drawer), and handles to
+        # them for single-row updates
+        self._rendered: Optional[tuple] = None
+        self._playlist_list: Optional[ft.ReorderableListView] = None
+        self._playlist_tiles: Dict[str, ft.Container] = {}
+        self._txt_playlist_title: Optional[ft.Text] = None
+        self._save_buttons: Dict[str, List[ft.IconButton]] = {}
 
         # UI Controls
         self.spinner = ft.ProgressRing(width=22, height=22, stroke_width=2.5, color=ACCENT_RED, visible=False)
@@ -90,6 +105,9 @@ class LibraryDrawer(ft.Container):
             padding=ft.Padding.only(right=6, bottom=16),
             expand=True,
         )
+        # Isolated: updating the drawer or the page (open/close, mode switches) does not
+        # walk every row. Row changes are sent by updating the list or the row itself.
+        self.content_list._isolated = True
 
         # Build Drawer Box Content
         drawer_content = ft.Column(
@@ -185,16 +203,23 @@ class LibraryDrawer(ft.Container):
         except Exception:
             pass
 
+        # Building the rows is the expensive part of opening the drawer, so the ones
+        # from last time are kept unless the playlist changed in the meantime.
+        rows_changed = True
         if self._is_searching:
-            self._render_search_results()
+            if self._rendered != self._search_signature():
+                self._render_search_results(push=False)
+            else:
+                self._restyle_save_buttons()
+        elif self._rendered != self._playlist_signature():
+            self._render_local_playlist(push=False)
         else:
-            self._render_local_playlist()
-        try:
-            self.update()
-        except Exception:
-            pass
+            rows_changed = False
+        self._push(self, *([self.content_list] if rows_changed else []))
 
     def close_drawer(self) -> None:
+        if not self.visible:
+            return
         self.visible = False
         try:
             self.update()
@@ -202,6 +227,32 @@ class LibraryDrawer(ft.Container):
             pass
         if self.on_close_callback:
             self.on_close_callback()
+
+    def _playlist_signature(self) -> tuple:
+        return ("playlist", tuple(t.id for t in self.audio_controller.queue))
+
+    def _search_signature(self) -> tuple:
+        return ("search", tuple(t.id for t in self._search_results), self.ytmusic_service.last_search_error)
+
+    def _clear_rows(self) -> None:
+        self.content_list.controls.clear()
+        self._rendered = None
+        self._playlist_list = None
+        self._playlist_tiles = {}
+        self._txt_playlist_title = None
+        self._save_buttons = {}
+
+    def _push(self, *controls: ft.Control) -> None:
+        """
+        Sends pending changes of just these controls. Pushing the drawer itself covers
+        its frame (visibility, search bar, spinner) but not the rows in content_list.
+        """
+        if not controls:
+            return  # page.update() without arguments would diff the whole page
+        try:
+            self.page.update(*controls)
+        except Exception:
+            pass
 
     def _dispatch(self, coro):
         if self.async_runner:
@@ -211,18 +262,22 @@ class LibraryDrawer(ft.Container):
 
     # ─── Local Playlist View ──────────────────────────────────────────
 
-    def _render_local_playlist(self) -> None:
+    def _render_local_playlist(self, push: bool = True) -> None:
         """Renders the saved playlist with a Play All header and a reorderable list."""
-        self.content_list.controls.clear()
+        self._clear_rows()
+        self._rendered = self._playlist_signature()
         tracks = self.audio_controller.queue
 
         # Header Info Row
+        self._txt_playlist_title = ft.Text(
+            f"My Playlist ({len(tracks)})", size=14, weight=ft.FontWeight.BOLD, color=TEXT_PRIMARY
+        )
         header = ft.Row(
             controls=[
                 ft.Row(
                     [
                         ft.Icon(ft.Icons.QUEUE_MUSIC_ROUNDED, size=18, color=ACCENT_RED),
-                        ft.Text(f"My Playlist ({len(tracks)})", size=14, weight=ft.FontWeight.BOLD, color=TEXT_PRIMARY),
+                        self._txt_playlist_title,
                     ],
                     spacing=4,
                 ),
@@ -234,7 +289,7 @@ class LibraryDrawer(ft.Container):
                         shape=ft.RoundedRectangleBorder(radius=8),
                         padding=ft.Padding.symmetric(horizontal=10, vertical=6),
                     ),
-                    on_click=lambda e: self._play(tracks[0]) if tracks else None,
+                    on_click=self._handle_play_all,
                     disabled=(len(tracks) == 0),
                 ),
             ],
@@ -267,18 +322,28 @@ class LibraryDrawer(ft.Container):
                 on_reorder=self._handle_playlist_reorder,
             )
             for idx, track in enumerate(tracks):
-                reorder_list.controls.append(self._build_local_track_tile(track, idx))
+                if track.id in self._playlist_tiles:
+                    # Same song saved twice (possible in older playlist files)
+                    tile = self._build_local_track_tile(track, f"pl_track_{track.id}_{idx}")
+                else:
+                    tile = self._build_local_track_tile(track, f"pl_track_{track.id}")
+                    self._playlist_tiles[track.id] = tile
+                reorder_list.controls.append(tile)
+            self._playlist_list = reorder_list
             self.content_list.controls.append(reorder_list)
 
-        try:
-            self.update()
-        except Exception:
-            pass
+        if push:
+            self._push(self, self.content_list)
 
-    def _build_local_track_tile(self, track: Track, index: int) -> ft.Container:
+    def _handle_play_all(self, e) -> None:
+        tracks = self.audio_controller.queue
+        if tracks:
+            self._play(tracks[0])
+
+    def _build_local_track_tile(self, track: Track, key: str) -> ft.Container:
         """Constructs list tile for local playlist with Drag Handle, Play and Delete actions."""
         return ft.Container(
-            key=f"pl_track_{track.id}_{index}",
+            key=key,
             content=ft.Row(
                 controls=[
                     # Drag Handle for Reordering
@@ -290,11 +355,12 @@ class LibraryDrawer(ft.Container):
                         mouse_cursor=ft.MouseCursor.GRAB,
                     ),
                     ft.Image(
-                        src=track.thumb_url or "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=200&q=80",
+                        src=track.thumb_url or FALLBACK_THUMB_URL,
                         width=40,
                         height=40,
                         border_radius=6,
                         fit=ft.BoxFit.COVER,
+                        cache_height=THUMB_CACHE_HEIGHT,
                     ),
                     ft.Container(width=2),
                     ft.Column(
@@ -343,7 +409,15 @@ class LibraryDrawer(ft.Container):
 
         self.audio_controller.move_track(old_idx, new_idx)
         self.on_playlist_modified()
-        self._render_local_playlist()
+
+        # Move the one tile, the same way the playlist moved the song
+        tiles = e.control.controls
+        if 0 <= old_idx < len(tiles) and 0 <= new_idx < len(tiles):
+            tiles.insert(new_idx, tiles.pop(old_idx))
+            self._rendered = self._playlist_signature()
+            self._push(e.control)
+        else:
+            self._render_local_playlist()
 
     def _handle_delete_track(self, track_id: str) -> None:
         """Removes a song from the playlist (it keeps playing if it is the current one)."""
@@ -351,8 +425,18 @@ class LibraryDrawer(ft.Container):
         self.on_playlist_modified()
         if self._is_searching:
             self._render_search_results()
-        else:
-            self._render_local_playlist()
+            return
+
+        tracks = self.audio_controller.queue
+        tile = self._playlist_tiles.pop(track_id, None)
+        tiles = self._playlist_list.controls if self._playlist_list else []
+        if tile is None or not tracks or len(tiles) - 1 != len(tracks):
+            self._render_local_playlist()  # Now empty, or the rows are out of step with the playlist
+            return
+        tiles.remove(tile)
+        self._txt_playlist_title.value = f"My Playlist ({len(tracks)})"
+        self._rendered = self._playlist_signature()
+        self._push(self._playlist_list, self._txt_playlist_title)
 
     # ─── YouTube Search & Add Songs ───────────────────────────────────
 
@@ -374,11 +458,8 @@ class LibraryDrawer(ft.Container):
 
     async def _run_search(self, query: str) -> None:
         self.spinner.visible = True
-        self.content_list.controls.clear()
-        try:
-            self.update()
-        except Exception:
-            pass
+        self._clear_rows()
+        self._push(self, self.content_list)
 
         loop = asyncio.get_running_loop()
         try:
@@ -390,8 +471,9 @@ class LibraryDrawer(ft.Container):
         self._search_results = tracks
         self._render_search_results()
 
-    def _render_search_results(self) -> None:
-        self.content_list.controls.clear()
+    def _render_search_results(self, push: bool = True) -> None:
+        self._clear_rows()
+        self._rendered = self._search_signature()
 
         # Search Results Header
         header = ft.Row(
@@ -439,32 +521,29 @@ class LibraryDrawer(ft.Container):
             for track in self._search_results:
                 self.content_list.controls.append(self._build_search_result_tile(track))
 
-        try:
-            self.update()
-        except Exception:
-            pass
+        if push:
+            self._push(self, self.content_list)
 
     def _build_search_result_tile(self, track: Track) -> ft.Container:
         """Search result tile: play (adds to the playlist) and add/remove toggle."""
-        is_saved = self.audio_controller.playlist.contains(track.id)
-
         btn_add = ft.IconButton(
-            icon=ft.Icons.CHECK_CIRCLE_ROUNDED if is_saved else ft.Icons.ADD_CIRCLE_OUTLINE_ROUNDED,
-            icon_color=ACCENT_GREEN if is_saved else ACCENT_CYAN,
+            icon=ft.Icons.ADD_CIRCLE_OUTLINE_ROUNDED,
             icon_size=24,
             on_click=lambda e, t=track: self._toggle_saved(t),
-            tooltip="Remove from My Playlist" if is_saved else "Add to My Playlist",
         )
+        self._style_save_button(btn_add, self.audio_controller.playlist.contains(track.id))
+        self._save_buttons.setdefault(track.id, []).append(btn_add)
 
         return ft.Container(
             content=ft.Row(
                 controls=[
                     ft.Image(
-                        src=track.thumb_url or "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=200&q=80",
+                        src=track.thumb_url or FALLBACK_THUMB_URL,
                         width=40,
                         height=40,
                         border_radius=6,
                         fit=ft.BoxFit.COVER,
+                        cache_height=THUMB_CACHE_HEIGHT,
                     ),
                     ft.Container(width=2),
                     ft.Column(
@@ -497,6 +576,12 @@ class LibraryDrawer(ft.Container):
             border=ft.Border.all(1, "rgba(255, 255, 255, 0.06)"),
         )
 
+    @staticmethod
+    def _style_save_button(button: ft.IconButton, is_saved: bool) -> None:
+        button.icon = ft.Icons.CHECK_CIRCLE_ROUNDED if is_saved else ft.Icons.ADD_CIRCLE_OUTLINE_ROUNDED
+        button.icon_color = ACCENT_GREEN if is_saved else ACCENT_CYAN
+        button.tooltip = "Remove from My Playlist" if is_saved else "Add to My Playlist"
+
     def _toggle_saved(self, track: Track) -> None:
         playlist = self.audio_controller.playlist
         if playlist.contains(track.id):
@@ -504,7 +589,19 @@ class LibraryDrawer(ft.Container):
         else:
             playlist.add(track)
         self.on_playlist_modified()
-        self._render_search_results()
+
+        # Only this song's button changes
+        buttons = self._save_buttons.get(track.id, [])
+        for button in buttons:
+            self._style_save_button(button, playlist.contains(track.id))
+        self._push(*buttons)
+
+    def _restyle_save_buttons(self) -> None:
+        """Songs may have been saved or removed elsewhere while the drawer was closed."""
+        playlist = self.audio_controller.playlist
+        for track_id, buttons in self._save_buttons.items():
+            for button in buttons:
+                self._style_save_button(button, playlist.contains(track_id))
 
     def _play(self, track: Track) -> None:
         self.audio_controller.play_track(track)

@@ -38,6 +38,11 @@ def get_app_data_dir() -> Path:
     return Path(".")
 
 
+# Bundled files sit next to the code. On Android the working directory is the writable
+# data folder, not the app folder, so a relative "assets/..." path does not reach them.
+APP_DIR = Path(__file__).resolve().parent.parent
+SAMPLE_PHOTOS_DIR = APP_DIR / "assets" / "samples"
+
 APP_DATA_DIR = get_app_data_dir()
 CONFIG_FILE_PATH = APP_DATA_DIR / "config.json"
 LOCAL_PLAYLIST_PATH = APP_DATA_DIR / "local_playlist.json"

@@ -8,6 +8,7 @@ import re
 COVER_SIZE = 720  # Sharp on tablets; about 2 MB once decoded
 THUMB_SIZE = 120
 _GOOGLE_IMAGE_SIZE = re.compile(r"=(?:w\d+-h\d+|s\d+)")
+_YTIMG_LARGE = re.compile(r"/(?:maxres|sd|hq)default\.")
 
 
 def _resize_art(url: str, size: int) -> str:
@@ -36,7 +37,8 @@ class Track:
 
     @property
     def thumb_url(self) -> str:
-        return _resize_art(self.art_url, THUMB_SIZE).replace("/maxresdefault.", "/mqdefault.")
+        # i.ytimg.com: mqdefault is 320x180, plenty for a 44px list thumbnail
+        return _YTIMG_LARGE.sub("/mqdefault.", _resize_art(self.art_url, THUMB_SIZE), count=1)
 
     def to_dict(self) -> dict:
         return asdict(self)

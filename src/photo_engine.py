@@ -1,29 +1,36 @@
 """
 Photo Engine for Digital Photo Frame.
-Asynchronously scans local directories for images (.jpg, .jpeg, .png, .webp),
-maintains randomized playback queue, and encodes downscaled photos for display
-(the ambient background blur is done on the GPU by Flutter).
+Scans local directories for images and videos, keeps the (optionally shuffled)
+slideshow order and prepares each photo for display as a `Slide`: a downscaled JPEG
+plus a tiny pre-blurred copy used as the ambient backdrop.
+
+Nothing here runs at startup: the folder is scanned and photos are decoded only when
+the UI asks, and both are meant to be called from a worker thread (see PhotoFrameView).
 """
 
-import base64
 from collections import OrderedDict
+from dataclasses import dataclass
 import io
 import os
 from pathlib import Path
 import random
-from typing import List, Optional
-try:
-    from PIL import Image
-except ImportError:
-    Image = None
+import threading
+from typing import List, Optional, Union
+
+from src.storage import SAMPLE_PHOTOS_DIR
 
 # Low-RAM tuning: a 1280px RGBA texture is ~3.7MB vs ~8MB at 1920px,
-# and only the current/next photos need to stay encoded.
+# and only the current and the pre-loaded next photo need to stay encoded.
 MAX_PHOTO_EDGE = 1280
-PHOTO_CACHE_SIZE = 4
+PHOTO_CACHE_SIZE = 3
+
+# The backdrop is a thumbnail that Flutter stretches over the screen: scaling ~96px up
+# to full screen is itself a heavy blur, so no blur filter has to run on the GPU.
+BACKDROP_EDGE = 96
+BACKDROP_BLUR_RADIUS = 1.8
 
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".mp4", ".webm", ".mkv"}
-FALLBACK_SAMPLES_DIR = Path("assets/samples").resolve()
+FALLBACK_SAMPLES_DIR = SAMPLE_PHOTOS_DIR
 
 DEFAULT_SAMPLE_WALLPAPERS = [
     "https://images.unsplash.com/photo-1506744038136-46273834b3fb?w=1920&q=85",
@@ -69,32 +76,42 @@ def resolve_android_folder_path(folder_path: str) -> str:
     return decoded
 
 
+@dataclass(frozen=True)
+class Slide:
+    """One slideshow item, ready to hand to Flet."""
+
+    src: Union[str, bytes]  # JPEG bytes, a remote image URL or a video file path
+    backdrop: Optional[bytes] = None  # Tiny pre-blurred PNG shown behind a letterboxed photo
+    is_video: bool = False
+
+
 class PhotoEngine:
 
     def is_video(self, file_path: str) -> bool:
         if not file_path: return False
         return file_path.lower().endswith((".mp4", ".webm", ".mkv"))
 
-    def __init__(self, initial_folder: Optional[str] = None, shuffle: bool = True, blur_radius: int = 24):
+    def __init__(self, initial_folder: Optional[str] = None, shuffle: bool = True):
+        """Remembers the folder only; call scan_folder() to look for photos."""
         self.folder_path: Path = Path(initial_folder) if initial_folder else FALLBACK_SAMPLES_DIR
         self.shuffle_enabled: bool = shuffle
-        self.blur_radius: int = blur_radius
         self.photo_paths: List[str] = []
         self._playlist: List[str] = []
         self._current_index: int = 0
-        self._src_cache: "OrderedDict[str, str]" = OrderedDict()  # photo path -> base64 jpeg
-
-        self.scan_folder(str(self.folder_path))
+        self._slide_cache: "OrderedDict[str, Slide]" = OrderedDict()
+        self._decode_lock = threading.Lock()  # One decode at a time; a second caller finds the cache
 
     def scan_folder(self, folder_path: str) -> int:
         """
         Scans target folder for supported image files on Android and Desktop.
         Resolves Android SAF URIs and scoped storage paths automatically.
+        Walking a large folder is slow, so call this from a worker thread.
         """
         resolved = resolve_android_folder_path(folder_path)
         print(f"[PhotoEngine] Scanning folder: '{folder_path}' -> Resolved path: '{resolved}'")
         target = Path(resolved)
         discovered: List[str] = []
+        scanned_folder: Optional[Path] = None
 
         if target.exists():
             if target.is_dir():
@@ -105,7 +122,7 @@ class PhotoEngine:
                             discovered.append(os.path.join(root, f))
             elif target.suffix.lower() in SUPPORTED_EXTENSIONS:
                 discovered.append(str(target))
-            self.folder_path = target
+            scanned_folder = target
         else:
             # Try searching in standard Android picture directories if folder name matches
             clean_name = target.name
@@ -117,7 +134,7 @@ class PhotoEngine:
                             if os.path.splitext(f)[1].lower() in SUPPORTED_EXTENSIONS:
                                 discovered.append(os.path.join(root, f))
                     if discovered:
-                        self.folder_path = cand_dir
+                        scanned_folder = cand_dir
                         break
 
         # If user folder has no photos, check assets/samples directory
@@ -131,8 +148,10 @@ class PhotoEngine:
 
         # If still no photos (e.g. on clean Android APK install), do not inject wallpapers automatically.
         # Let it report 0 photos so the user knows they need to grant Android Storage permissions.
-        pass
 
+        # Publish the result only now, so the slideshow never sees a half-scanned folder
+        if scanned_folder is not None:
+            self.folder_path = scanned_folder
         self.photo_paths = discovered
         self._reset_playlist()
         print(f"[PhotoEngine] Discovered {len(self.photo_paths)} photos.")
@@ -150,14 +169,10 @@ class PhotoEngine:
 
     def _reset_playlist(self) -> None:
         """Regenerates the image playlist with optional shuffle."""
-        if not self.photo_paths:
-            self._playlist = list(DEFAULT_SAMPLE_WALLPAPERS)
-            self._current_index = 0
-            return
-
-        self._playlist = list(self.photo_paths)
-        if self.shuffle_enabled and len(self._playlist) > 1:
-            random.shuffle(self._playlist)
+        playlist = list(self.photo_paths) or list(DEFAULT_SAMPLE_WALLPAPERS)
+        if self.photo_paths and self.shuffle_enabled and len(playlist) > 1:
+            random.shuffle(playlist)
+        self._playlist = playlist
         self._current_index = 0
 
     def set_shuffle(self, enabled: bool) -> None:
@@ -180,6 +195,12 @@ class PhotoEngine:
             random.shuffle(self._playlist)
         return self._playlist[self._current_index]
 
+    def peek_next_photo(self) -> Optional[str]:
+        """The photo get_next_photo() will most likely return, without advancing (used to pre-load it)."""
+        if not self._playlist:
+            return None
+        return self._playlist[(self._current_index + 1) % len(self._playlist)]
+
     def get_previous_photo(self) -> Optional[str]:
         """Steps back to previous photo in playlist."""
         if not self._playlist:
@@ -187,50 +208,67 @@ class PhotoEngine:
         self._current_index = (self._current_index - 1) % len(self._playlist)
         return self._playlist[self._current_index]
 
-    def get_photo_src(self, photo_path: Optional[str]) -> Optional[str]:
+    def load_slide(self, photo_path: Optional[str]) -> Optional[Slide]:
         """
-        Returns renderable image source for ft.Image:
-        - For remote URLs, returns the URL.
-        - For local files on Android/Desktop, returns base64 data string to ensure 100% reliable rendering.
+        Prepares a photo for display. Decoding and re-encoding a camera photo takes a
+        while, so call this from a worker thread; the most recent results are cached.
+        Remote URLs and videos are passed through for Flutter to load itself.
         """
         if not photo_path:
             return None
 
-        if photo_path.startswith("http://") or photo_path.startswith("https://") or photo_path.startswith("data:image"):
-            return photo_path
+        if photo_path.startswith(("http://", "https://")):
+            return Slide(src=photo_path)
 
         if not os.path.exists(photo_path):
             return None
 
         if self.is_video(photo_path):
-            return photo_path
+            return Slide(src=photo_path, is_video=True)
 
-        cached = self._src_cache.get(photo_path)
-        if cached:
-            self._src_cache.move_to_end(photo_path)
-            return cached
+        with self._decode_lock:
+            cached = self._slide_cache.get(photo_path)
+            if cached:
+                self._slide_cache.move_to_end(photo_path)
+                return cached
 
+            try:
+                slide = self._encode(photo_path)
+            except Exception as e:
+                print(f"[PhotoEngine] Error encoding photo {photo_path}: {e}")
+                return None
+
+            self._slide_cache[photo_path] = slide
+            while len(self._slide_cache) > PHOTO_CACHE_SIZE:
+                self._slide_cache.popitem(last=False)
+            return slide
+
+    @staticmethod
+    def _encode(photo_path: str) -> Slide:
         try:
-            if Image:
-                with Image.open(photo_path) as img:
-                    # draft() lets the JPEG decoder downscale while decoding, avoiding a full-size bitmap
-                    img.draft("RGB", (MAX_PHOTO_EDGE, MAX_PHOTO_EDGE))
-                    img = img.convert("RGB")
-                    img.thumbnail((MAX_PHOTO_EDGE, MAX_PHOTO_EDGE), Image.Resampling.BILINEAR)
-                    buf = io.BytesIO()
-                    img.save(buf, format="JPEG", quality=85)
-                b64 = f"data:image/jpeg;base64,{base64.b64encode(buf.getvalue()).decode('utf-8')}"
-                self._src_cache[photo_path] = b64
-                while len(self._src_cache) > PHOTO_CACHE_SIZE:
-                    self._src_cache.popitem(last=False)
-                return b64
-            else:
-                with open(photo_path, "rb") as f:
-                    data = base64.b64encode(f.read()).decode("utf-8")
-                    return f"data:image/jpeg;base64,{data}"
-        except Exception as e:
-            print(f"[PhotoEngine] Error encoding photo {photo_path}: {e}")
-            return None
+            from PIL import Image, ImageFilter, ImageOps  # Imported on first use to keep startup light
+        except ImportError:
+            with open(photo_path, "rb") as f:
+                return Slide(src=f.read())
+
+        with Image.open(photo_path) as img:
+            # draft() lets the JPEG decoder downscale while decoding, avoiding a full-size bitmap
+            img.draft("RGB", (MAX_PHOTO_EDGE, MAX_PHOTO_EDGE))
+            img = img.convert("RGB")
+            img.thumbnail((MAX_PHOTO_EDGE, MAX_PHOTO_EDGE), Image.Resampling.BILINEAR)
+            # Phones store portrait shots sideways plus an EXIF "rotate" tag. The tag is not
+            # written to the re-encoded JPEG, so turn the pixels upright here (on the
+            # already-downscaled image, where it is cheap).
+            ImageOps.exif_transpose(img, in_place=True)
+            photo = io.BytesIO()
+            img.save(photo, format="JPEG", quality=85)
+
+            img.thumbnail((BACKDROP_EDGE, BACKDROP_EDGE), Image.Resampling.BILINEAR)
+            backdrop = io.BytesIO()
+            # Lossless: stretched ~13x, even faint JPEG blocks show as blotches in dark
+            # areas (seen on a real tablet). At this size a PNG is only a few KB.
+            img.filter(ImageFilter.GaussianBlur(BACKDROP_BLUR_RADIUS)).save(backdrop, format="PNG")
+        return Slide(src=photo.getvalue(), backdrop=backdrop.getvalue())
 
     @property
     def total_photos(self) -> int:

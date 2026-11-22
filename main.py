@@ -31,6 +31,11 @@ from src.ui.photo_view import PhotoFrameView
 from src.ui.settings_view import SettingsView
 from src.ui.theme import BG_DARK
 
+# Every handler in this app updates the controls it changed itself. Flet's implicit
+# update would otherwise diff the whole page after each event, including the audio
+# position event that arrives every second during playback and every screen tap.
+ft.context.disable_auto_update()
+
 
 async def main(page: ft.Page):
 
@@ -54,10 +59,9 @@ async def main(page: ft.Page):
     page.padding = 0
     page.spacing = 0
 
+    # Only the family the theme uses; each entry is a download on every start
     page.fonts = {
         "Prompt": "https://github.com/google/fonts/raw/main/ofl/prompt/Prompt-Regular.ttf",
-        "Prompt-Medium": "https://github.com/google/fonts/raw/main/ofl/prompt/Prompt-Medium.ttf",
-        "Prompt-Bold": "https://github.com/google/fonts/raw/main/ofl/prompt/Prompt-Bold.ttf",
     }
     page.theme = ft.Theme(
         font_family="Prompt",
@@ -73,6 +77,7 @@ async def main(page: ft.Page):
     config_mgr = ConfigManager()
     state = AppState(idle_threshold_seconds=config_mgr.get("idle_timeout_seconds"))
 
+    # The folder is scanned in the background once the UI is up (see initial_photo_scan)
     photo_engine = PhotoEngine(
         initial_folder=config_mgr.get("photo_folder"),
         shuffle=config_mgr.get("slideshow_shuffle"),
@@ -109,14 +114,16 @@ async def main(page: ft.Page):
             library_drawer.close_drawer()
             dashboard_container.visible = False
             photo_view_container.visible = True
-            photo_view.apply_settings()
-            photo_view.update_now_playing()
+            photo_view.on_show()
         elif new_mode == AppMode.MUSIC_PLAYER:
             action_overlay.hide()
             photo_view_container.visible = False
             dashboard_container.visible = True
+            # Coming back from Settings the view is re-added and sent whole by the page
+            # update below; otherwise it is still mounted and pushes its own changes.
+            remounting = content_area.content is not music_view
             content_area.content = music_view
-            music_view.update_view()
+            music_view.update_view(push=not remounting)
         elif new_mode == AppMode.SETTINGS:
             action_overlay.hide()
             photo_view_container.visible = False
@@ -142,22 +149,23 @@ async def main(page: ft.Page):
         set_app_mode(AppMode.MUSIC_PLAYER)
 
     # --- 7. File Picker (Photo Folder) ---
-    def on_folder_result(e):
-        if e.path:
-            folder_path = e.path
-            config_mgr.set_photo_folder(folder_path)
-            photo_count = photo_engine.scan_folder(folder_path)
-            settings_view.update_folder_info()
-            photo_view.reload_photos()
+    async def load_photo_folder(folder_path: str):
+        config_mgr.set_photo_folder(folder_path)
+        # Walking a large folder can take seconds; a worker thread keeps the UI responsive
+        photo_count = await asyncio.to_thread(photo_engine.scan_folder, folder_path)
+        settings_view.update_folder_info()
+        photo_view.reload_photos()
 
-            snack = ft.SnackBar(
-                content=ft.Text(f"Loaded {photo_count} photos from {Path(folder_path).name}"),
-                bgcolor="#1E293B",
-                duration=3000,
-            )
-            page.overlay.append(snack)
-            snack.open = True
-            page.update()    # FilePicker Service...
+        snack = ft.SnackBar(
+            content=ft.Text(f"Loaded {photo_count} photos from {Path(folder_path).name}"),
+            bgcolor="#1E293B",
+            duration=3000,
+        )
+        page.overlay.append(snack)
+        snack.open = True
+        page.update()
+
+    # FilePicker Service...
     file_picker = ft.FilePicker()
 
     def trigger_pick_folder():
@@ -166,9 +174,7 @@ async def main(page: ft.Page):
             try:
                 path = await file_picker.get_directory_path(dialog_title="Select Photo Slideshow Folder")
                 if path:
-                    class MockEvent:
-                        def __init__(self, p): self.path = p
-                    on_folder_result(MockEvent(path))
+                    await load_photo_folder(path)
             except Exception as ex:
                 print("FilePicker error:", ex)
         page.run_task(pick_task)
@@ -300,26 +306,34 @@ async def main(page: ft.Page):
                 interval = config_mgr.get("slideshow_interval_seconds")
                 await asyncio.sleep(interval)
                 if state.mode == AppMode.PHOTO_FRAME and not state.is_overlay_open:
-                    photo_view.advance_photo()
+                    await photo_view.advance_photo()
             except Exception as ex:
                 print(f"[SlideshowTask] Error: {ex}")
 
     async def progress_tracker_task():
-        """Updates track elapsed time and seeker."""
+        """Moves the seek bar once a second while the player screen is showing."""
         while True:
             await asyncio.sleep(1)
             try:
-                if audio_controller.is_playing:
-                    if state.mode == AppMode.MUSIC_PLAYER:
-                        music_view.update_progress_only()
-                    elif state.mode == AppMode.PHOTO_FRAME:
-                        photo_view.update_now_playing()
+                # The photo frame's now-playing card follows player events instead of polling
+                if audio_controller.is_playing and state.mode == AppMode.MUSIC_PLAYER:
+                    music_view.update_progress_only()
             except Exception as ex:
                 print(f"[ProgressTracker] Error: {ex}")
+
+    async def initial_photo_scan():
+        """Looks for photos after the first frame is up, so a big folder never delays startup."""
+        try:
+            await asyncio.to_thread(photo_engine.scan_folder, str(photo_engine.folder_path))
+            settings_view.update_folder_info()
+            photo_view.reload_photos()
+        except Exception as ex:
+            print(f"[PhotoScan] Error: {ex}")
 
     page.run_task(idle_watcher_task)
     page.run_task(slideshow_task)
     page.run_task(progress_tracker_task)
+    page.run_task(initial_photo_scan)
 
     # Enable Wakelock for Digital Photo Frame
     async def enable_wakelock():
